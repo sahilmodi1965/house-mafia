@@ -1,0 +1,63 @@
+name: Cleanup auto/* branches
+# Weekly sweep: deletes auto/* branches that are merged, OR older than 7 days
+# and unmerged (presumed abandoned).
+# Deployed by the Stratos Games Factory — do not hand-edit.
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Sunday 00:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sweep auto/* branches
+        run: |
+          set -uo pipefail
+          deleted_merged=0
+          deleted_stale=0
+
+          git fetch --prune origin
+
+          mapfile -t refs < <(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/auto/*' || true)
+          if [ ${#refs[@]} -eq 0 ]; then
+            echo "No auto/* branches found."
+            exit 0
+          fi
+
+          for ref in "${refs[@]}"; do
+            branch="${ref#origin/}"
+
+            # Is it merged into main?
+            if git branch -r --contains "$ref" 2>/dev/null | grep -qE 'origin/main$'; then
+              echo "merged → deleting $branch"
+              git push origin --delete "$branch" || true
+              deleted_merged=$((deleted_merged + 1))
+              continue
+            fi
+
+            # Otherwise check age
+            commit_date=$(git log -1 --format=%ct "$ref" 2>/dev/null || echo 0)
+            now=$(date +%s)
+            age_days=$(( (now - commit_date) / 86400 ))
+            if [ "$age_days" -gt 7 ]; then
+              echo "stale ($age_days days, unmerged) → deleting $branch"
+              git push origin --delete "$branch" || true
+              deleted_stale=$((deleted_stale + 1))
+            else
+              echo "keep ($age_days days, unmerged): $branch"
+            fi
+          done
+
+          echo
+          echo "Cleanup summary:"
+          echo "  merged & deleted: $deleted_merged"
+          echo "  stale & deleted:  $deleted_stale"
