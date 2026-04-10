@@ -1,0 +1,118 @@
+name: Auto-merge daemon PRs
+# When a daemon-opened PR (head branch starts with "auto/") opens or syncs:
+#   1. Wait for CI to finish on this same SHA.
+#   2. If CI passed AND the diff only touches safe paths (no .js/.ts/.html,
+#      no src/game.js, no src/roles.js, no src/phases/), merge.
+#   3. Otherwise, leave the PR open for human review.
+#
+# Deployed by the Stratos Games Factory — do not hand-edit.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    if: ${{ startsWith(github.head_ref, 'auto/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for CI to complete on this PR
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          sleep 15
+          attempts=40   # 40 * 15s = 10 min cap
+          i=0
+          while [ "$i" -lt "$attempts" ]; do
+            i=$((i + 1))
+            line=$(gh pr checks "$PR" --repo "${{ github.repository }}" 2>/dev/null | awk '$1 == "build"' | head -1)
+            state=$(echo "$line" | awk '{print $2}')
+            echo "[$i/$attempts] build = ${state:-unknown}"
+            case "$state" in
+              pass)
+                echo "ci=pass" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              fail|cancelled|skipping|action_required)
+                echo "ci=fail" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+              *)
+                sleep 15
+                ;;
+            esac
+          done
+          echo "ci=timeout" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect changed files
+        id: safety
+        if: steps.wait.outputs.ci == 'pass'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          changed=$(gh pr diff "$PR" --repo "${{ github.repository }}" --name-only)
+          echo "Changed files:"
+          echo "$changed"
+          echo
+
+          unsafe=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              # Core game logic — needs human review
+              src/game.js) unsafe="$unsafe $f" ;;
+              src/roles.js) unsafe="$unsafe $f" ;;
+              src/room.js) unsafe="$unsafe $f" ;;
+              src/phases/*) unsafe="$unsafe $f" ;;
+              # Generic logic/structure files
+              *.js|*.mjs|*.cjs|*.ts|*.tsx|*.jsx|*.html|*.htm|*.vue|*.svelte)
+                unsafe="$unsafe $f" ;;
+              *) ;;
+            esac
+          done <<< "$changed"
+
+          if [ -n "$unsafe" ]; then
+            echo "Unsafe paths detected (will NOT auto-merge):"
+            for u in $unsafe; do echo "  $u"; done
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "All changes are safe-path only — eligible for auto-merge."
+            echo "safe=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge PR
+        if: steps.safety.outputs.safe == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr edit "$PR" --repo "${{ github.repository }}" --add-label "auto-merged"
+          gh pr comment "$PR" --repo "${{ github.repository }}" --body "🤖 **Auto-merged by Stratos Games Factory** — diff only touches safe paths (no .js/.ts/.html, no core game/multiplayer logic) and CI passed."
+          gh pr merge "$PR" --repo "${{ github.repository }}" --merge --delete-branch
+
+      - name: Comment why not merged
+        if: steps.wait.outputs.ci == 'pass' && steps.safety.outputs.safe == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- stratos-auto-merge-skipped -->'
+          existing=$(gh pr view "$PR" --repo "${{ github.repository }}" --json comments --jq "[.comments[] | select(.body | contains(\"$marker\"))] | length")
+          if [ "$existing" = "0" ]; then
+            gh pr comment "$PR" --repo "${{ github.repository }}" --body "${marker} 🤖 **Stratos auto-merge skipped** — diff touches logic/structure files (.js/.ts/.html or core game directories). Holding for human review."
+          fi
