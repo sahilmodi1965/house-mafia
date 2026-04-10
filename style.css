@@ -161,3 +161,81 @@ h1 {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* --- Role reveal screen --- */
+
+.role-card {
+  width: 200px;
+  height: 280px;
+  margin: 2rem auto;
+  perspective: 600px;
+}
+
+.role-card__inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.2s ease-in-out;
+  transform-style: preserve-3d;
+}
+
+.role-card__inner.flipped {
+  transform: rotateY(180deg);
+}
+
+.role-card__front,
+.role-card__back {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.role-card__front {
+  background-color: var(--surface);
+  border: 2px solid var(--neon-cyan);
+}
+
+.role-card__question {
+  font-size: 4rem;
+  font-weight: 900;
+  color: var(--neon-cyan);
+}
+
+.role-card__back {
+  background-color: var(--surface);
+  border: 2px solid var(--role-color, var(--neon-pink));
+  transform: rotateY(180deg);
+}
+
+.role-card__emoji {
+  font-size: 4rem;
+  margin-bottom: 0.75rem;
+}
+
+.role-card__name {
+  font-size: 1.5rem;
+  font-weight: 900;
+  color: var(--role-color, var(--neon-pink));
+}
+
+.role-description {
+  font-size: 1rem;
+  color: var(--text);
+  margin-bottom: 1.5rem;
+  padding: 0 1rem;
+  line-height: 1.5;
+  transition: opacity 0.2s ease-in-out;
+}
+
+.ready-status {
+  font-size: 0.875rem;
+  color: var(--neon-cyan);
+  margin-top: 0.5rem;
+  min-height: 1.25rem;
+}

@@ -1,4 +1,5 @@
 import { GAME } from './config.js';
+import { startGame } from './game.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -11,6 +12,7 @@ let currentPlayer = null;
 let players = [];
 let isHost = false;
 let roomCode = null;
+let appEl = null;
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -161,6 +163,7 @@ export function showJoinScreen(app, onBack) {
 // --- Channel subscription ---
 
 async function subscribeToRoom(app, onBack) {
+  appEl = app;
   channel = supabase.channel(`room:${roomCode}`, {
     config: { presence: { key: currentPlayer.id } },
   });
@@ -181,7 +184,13 @@ async function subscribeToRoom(app, onBack) {
         // Handled by sync
       })
       .on('broadcast', { event: 'game:start' }, () => {
-        // game:start received — do NOT implement game start logic per issue spec
+        startGame({
+          channel,
+          players: [...players],
+          currentPlayer,
+          isHost,
+          app: appEl,
+        });
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -273,6 +282,14 @@ function renderLobby() {
           event: 'game:start',
           payload: {},
         });
+        // Broadcast doesn't echo back to sender, so trigger locally
+        startGame({
+          channel,
+          players: [...players],
+          currentPlayer,
+          isHost,
+          app: appEl,
+        });
       });
     }
   } else {
@@ -291,4 +308,5 @@ function cleanup() {
   players = [];
   isHost = false;
   roomCode = null;
+  appEl = null;
 }
