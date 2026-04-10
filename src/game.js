@@ -1,5 +1,7 @@
 import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
+import { showDayDiscussion } from './phases/day.js';
+import { showVoting } from './phases/vote.js';
 
 /**
  * Game loop orchestration.
@@ -9,6 +11,95 @@ import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 
 /** Game state — authoritative on the host's client */
 let gameState = null;
+
+/**
+ * Check win conditions after an elimination.
+ * @returns {string|null} 'mafia' | 'guests' | null
+ */
+function checkWinCondition() {
+  if (!gameState) return null;
+  const alive = gameState.players.filter(p => p.alive);
+  const mafiaAlive = alive.filter(p => p.role.id === 'mafia').length;
+  const nonMafiaAlive = alive.length - mafiaAlive;
+
+  if (mafiaAlive === 0) return 'guests';
+  if (mafiaAlive >= nonMafiaAlive) return 'mafia';
+  return null;
+}
+
+/**
+ * Start the Day phase (discussion + voting).
+ * @param {Object} opts
+ * @param {Object} opts.channel - Supabase Realtime channel
+ * @param {Object} opts.currentPlayer - { id, name }
+ * @param {boolean} opts.isHost
+ * @param {HTMLElement} opts.app
+ * @param {string|null} opts.nightEliminatedName - Name eliminated during night
+ */
+function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName }) {
+  if (isHost) {
+    gameState.phase = 'day-discuss';
+    channel.send({
+      type: 'broadcast',
+      event: 'phase:day-discuss',
+      payload: {
+        eliminatedName: nightEliminatedName,
+        players: gameState.players,
+      },
+    });
+  }
+
+  showDayDiscussion({
+    app,
+    channel,
+    players: gameState.players,
+    currentPlayer,
+    isHost,
+    eliminatedName: nightEliminatedName,
+    onDiscussionEnd: () => {
+      startVotePhase({ channel, currentPlayer, isHost, app });
+    },
+  });
+
+  // Non-host listens for vote transition
+  if (!isHost) {
+    channel.on('broadcast', { event: 'phase:day-vote' }, () => {
+      startVotePhase({ channel, currentPlayer, isHost, app });
+    });
+  }
+}
+
+/**
+ * Start the voting sub-phase of Day.
+ */
+function startVotePhase({ channel, currentPlayer, isHost, app }) {
+  if (isHost) {
+    gameState.phase = 'day-vote';
+  }
+
+  showVoting({
+    app,
+    channel,
+    players: gameState.players,
+    currentPlayer,
+    isHost,
+    onVoteResult: (result) => {
+      if (result.eliminatedPlayer && isHost) {
+        const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
+        if (target) target.alive = false;
+      }
+
+      const winner = checkWinCondition();
+      if (winner) {
+        // Game over (game-over screen not yet implemented)
+        console.log(`Game over! ${winner} win.`);
+      } else {
+        // Transition to next Night (not yet implemented)
+        console.log('Day phase complete. Transitioning to Night phase...');
+      }
+    },
+  });
+}
 
 /**
  * Start the game. Called when game:start is triggered.
@@ -50,10 +141,31 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
     updateReadyStatus(readySet.size, totalPlayers);
 
     if (readySet.size >= totalPlayers) {
-      // All players ready — transition to Night (not yet implemented)
-      console.log('All players ready. Transitioning to Night phase...');
+      // All players ready — transition to Day (Night not yet implemented)
+      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
     }
   });
+
+  // Non-host: listen for Day phase broadcast from host
+  if (!isHost) {
+    channel.on('broadcast', { event: 'phase:day-discuss' }, (msg) => {
+      // Update local game state from host broadcast
+      if (msg.payload.players) {
+        gameState = {
+          phase: 'day-discuss',
+          players: msg.payload.players,
+          roles: {},
+        };
+      }
+      startDayPhase({
+        channel,
+        currentPlayer,
+        isHost,
+        app,
+        nightEliminatedName: msg.payload.eliminatedName,
+      });
+    });
+  }
 
   if (isHost) {
     // Host runs role assignment

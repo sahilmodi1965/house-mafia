@@ -239,3 +239,152 @@ h1 {
   margin-top: 0.5rem;
   min-height: 1.25rem;
 }
+
+/* --- Timer component --- */
+
+.timer {
+  font-size: 3rem;
+  font-weight: 900;
+  color: var(--neon-cyan);
+  text-align: center;
+  margin: 1rem auto;
+  min-width: 80px;
+}
+
+.timer--warning {
+  color: var(--neon-pink);
+  animation: timer-pulse 0.5s ease-in-out infinite alternate;
+}
+
+@keyframes timer-pulse {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0.6; transform: scale(1.1); }
+}
+
+/* --- Day discussion screen --- */
+
+.day-announcement {
+  font-size: 1rem;
+  color: var(--neon-yellow);
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background-color: var(--surface);
+  border-radius: 8px;
+  line-height: 1.4;
+}
+
+.day-player-list {
+  list-style: none;
+  margin-bottom: 1rem;
+}
+
+.day-player-item {
+  padding: 0.5rem 1rem;
+  margin-bottom: 0.25rem;
+  background-color: var(--surface);
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  text-align: left;
+}
+
+.day-player-item--dead {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.day-player-status {
+  font-size: 0.75rem;
+  color: var(--neon-pink);
+  margin-left: 0.5rem;
+}
+
+/* --- Day chat --- */
+
+.day-chat {
+  margin-top: 0.5rem;
+}
+
+.day-chat__messages {
+  background-color: var(--surface);
+  border-radius: 8px;
+  padding: 0.5rem;
+  height: 120px;
+  overflow-y: auto;
+  margin-bottom: 0.5rem;
+  text-align: left;
+}
+
+.day-chat__msg {
+  font-size: 0.875rem;
+  margin-bottom: 0.25rem;
+  line-height: 1.3;
+}
+
+.day-chat__input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.day-chat__input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.day-chat__send {
+  width: auto;
+  min-width: 60px;
+  margin-bottom: 0;
+}
+
+.day-chat__spectator {
+  font-size: 0.875rem;
+  color: var(--neon-pink);
+  font-style: italic;
+}
+
+/* --- Voting screen --- */
+
+.vote-buttons {
+  margin-bottom: 1rem;
+}
+
+.vote-btn {
+  margin-bottom: 0.5rem;
+}
+
+.vote-btn--selected {
+  background-color: var(--neon-yellow);
+  color: var(--bg);
+}
+
+.vote-btn--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.vote-status {
+  font-size: 0.875rem;
+  color: var(--neon-cyan);
+  min-height: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.vote-spectator {
+  font-size: 0.875rem;
+  color: var(--neon-pink);
+  font-style: italic;
+}
+
+/* --- Day result screen --- */
+
+.vote-result-name {
+  font-size: 1.5rem;
+  font-weight: 900;
+  color: var(--neon-pink);
+  margin: 1.5rem 0 0.75rem;
+}
+
+.vote-result-role {
+  font-size: 1.125rem;
+  margin-bottom: 1rem;
+}
