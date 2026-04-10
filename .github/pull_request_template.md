@@ -7,9 +7,9 @@
 
 1. Open the preview URL — it will be posted as a comment on this PR by the `PR Preview` workflow.
 2. [ ] Game loads without errors (white screen = failure).
-3. [ ] Main menu appears and the Play button is clickable.
-4. [ ] Start a game — does the new feature / fix work as described?
-5. [ ] Play through at least 3 levels — no regressions on existing mechanics?
+3. [ ] Main screen appears and is interactive.
+4. [ ] Start playing — does the new feature / fix work as described?
+5. [ ] Play through several rounds / levels — no regressions on existing mechanics?
 6. [ ] Check on mobile (open the preview URL on a phone browser).
 
 ## Device testing checklist

@@ -1,6 +1,6 @@
 ---
 name: Build Request
-about: Ask the Stratos Games Factory daemon to make a small, targeted change.
+about: Ask the Stratos Games Factory to make a small, targeted change.
 title: "[build] "
 labels: ["build-request"]
 assignees: []
@@ -48,8 +48,8 @@ Optional. Screenshots, videos, links to a previous issue, etc.
 ---
 
 <!--
-Reviewer / daemon notes — do not edit:
+Reviewer notes — do not edit:
 - Label `build-request` is added automatically by this template.
-- Daemon picks this up within 1 hour, opens a PR, comments here with the link.
-- If the daemon refuses, you'll see a comment explaining why — refine and reopen.
+- The swarm picks this up when Sahil runs it, opens a PR, and comments here with the link.
+- If the builder refuses, you'll see a comment explaining why — refine and reopen.
 -->
