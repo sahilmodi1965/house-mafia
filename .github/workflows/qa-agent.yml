@@ -1,0 +1,104 @@
+name: QA
+# Playwright smoke test on every PR — the cheapest visual QA the factory can run.
+# Asserts the built game loads without console errors, the main container is
+# visible, and takes a full-page screenshot posted as a PR comment.
+# Deployed by the Stratos Games Factory — do not hand-edit.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: qa-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: playwright smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build game
+        run: npm run build
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke test
+        id: playwright
+        run: npx playwright test
+        continue-on-error: false
+
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-screenshot-pr-${{ github.event.pull_request.number }}
+          path: playwright-report/**/*.png
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload HTML report artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-report-pr-${{ github.event.pull_request.number }}
+          path: playwright-report/
+          retention-days: 14
+
+      - name: Comment on PR (success)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set +e
+          artifact_url="https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+          marker='<!-- stratos-qa-result -->'
+          existing=$(gh pr view "$PR" --repo "${{ github.repository }}" --json comments --jq "[.comments[] | select(.body | contains(\"$marker\"))] | first | .id // empty")
+          body=$(printf '%s\n\n🟢 **QA passed** — smoke test ran cleanly. [Screenshot artifact](%s) (look for `qa-screenshot-pr-%s`).' "$marker" "$artifact_url" "$PR")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null
+          else
+            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$body"
+          fi
+
+      - name: Comment on PR (failure)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set +e
+          artifact_url="https://github.com/${{ github.repository }}/actions/runs/${RUN_ID}"
+          marker='<!-- stratos-qa-result -->'
+          existing=$(gh pr view "$PR" --repo "${{ github.repository }}" --json comments --jq "[.comments[] | select(.body | contains(\"$marker\"))] | first | .id // empty")
+          body=$(printf '%s\n\n🔴 **QA failed** — the Playwright smoke test did not pass. Check the [failing run](%s) for logs and the `qa-report-pr-%s` artifact for the HTML report. This PR is blocked until QA is green.' "$marker" "$artifact_url" "$PR")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null
+          else
+            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$body"
+          fi
