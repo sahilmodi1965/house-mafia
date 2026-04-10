@@ -34,8 +34,8 @@ jobs:
       - name: Install
         run: npm install
 
-      - name: Build
-        run: npm run build
+      - name: Build (with PR preview base path)
+        run: npx vite build --base /house-mafia/pr/${{ github.event.pull_request.number }}/
 
       - name: Publish preview to gh-pages
         uses: peaceiris/actions-gh-pages@v4
