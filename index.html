@@ -4,10 +4,32 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>House Mafia</title>
-  <script type="module" crossorigin src="/house-mafia/assets/index-bcYvTYiV.js"></script>
-  <link rel="stylesheet" crossorigin href="/house-mafia/assets/index-X4VYwvDg.css">
+  <script type="module" crossorigin src="/house-mafia/assets/index-BpW2JG7c.js"></script>
+  <link rel="stylesheet" crossorigin href="/house-mafia/assets/index-DXp9iVxD.css">
 </head>
 <body>
   <div id="app"></div>
+
+  <!-- Role reveal screen template (populated dynamically by src/ui/screens.js) -->
+  <template id="tmpl-role-reveal">
+    <div id="screen-role-reveal" class="screen active">
+      <h1>Your Role</h1>
+      <div class="role-card" id="role-card">
+        <div class="role-card__inner" id="role-card-inner">
+          <div class="role-card__front">
+            <span class="role-card__question">?</span>
+          </div>
+          <div class="role-card__back">
+            <span class="role-card__emoji"></span>
+            <span class="role-card__name"></span>
+          </div>
+        </div>
+      </div>
+      <p class="role-description" id="role-description"></p>
+      <button class="btn btn--pink" id="btn-ready">Ready</button>
+      <p class="ready-status" id="ready-status"></p>
+    </div>
+  </template>
+
 </body>
 </html>
