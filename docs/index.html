@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>House Mafia</title>
-  <script type="module" crossorigin src="/house-mafia/assets/index-DrYRbmjx.js"></script>
-  <link rel="stylesheet" crossorigin href="/house-mafia/assets/index-AcGcAchR.css">
+  <script type="module" crossorigin src="/house-mafia/assets/index-Cw_zk-2h.js"></script>
+  <link rel="stylesheet" crossorigin href="/house-mafia/assets/index-Dc2PBpAZ.css">
 </head>
 <body>
   <div id="app"></div>
@@ -28,6 +28,17 @@
       <p class="role-description" id="role-description"></p>
       <button class="btn btn--pink" id="btn-ready">Ready</button>
       <p class="ready-status" id="ready-status"></p>
+    </div>
+  </template>
+
+  <!-- Night phase screen template (populated dynamically by src/phases/night.js) -->
+  <template id="tmpl-night">
+    <div id="screen-night" class="screen active night-screen">
+      <h1 class="night-header"></h1>
+      <div id="night-timer-container"></div>
+      <div class="night-targets" id="night-targets"></div>
+      <button class="btn night-confirm" id="night-confirm" disabled>Confirm</button>
+      <p class="night-status" id="night-status"></p>
     </div>
   </template>
 

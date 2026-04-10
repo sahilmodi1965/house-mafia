@@ -1,5 +1,6 @@
 import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
+import { showNight } from './phases/night.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 
@@ -11,6 +12,12 @@ import { showVoting } from './phases/vote.js';
 
 /** Game state — authoritative on the host's client */
 let gameState = null;
+
+/** Role assignment data for the current player (set during role:assign) */
+let myRoleData = null;
+
+/** The game host's player id (for night action targeting) */
+let gameHostPlayerId = null;
 
 /**
  * Check win conditions after an elimination.
@@ -25,6 +32,46 @@ function checkWinCondition() {
   if (mafiaAlive === 0) return 'guests';
   if (mafiaAlive >= nonMafiaAlive) return 'mafia';
   return null;
+}
+
+/**
+ * Start the Night phase.
+ * @param {Object} opts
+ * @param {Object} opts.channel - Supabase Realtime channel
+ * @param {Object} opts.currentPlayer - { id, name }
+ * @param {boolean} opts.isHost
+ * @param {HTMLElement} opts.app
+ */
+function startNightPhase({ channel, currentPlayer, isHost, app }) {
+  if (isHost) {
+    gameState.phase = 'night';
+    channel.send({
+      type: 'broadcast',
+      event: 'phase:night',
+      payload: { players: gameState.players },
+    });
+  }
+
+  showNight({
+    app,
+    channel,
+    players: gameState.players,
+    currentPlayer,
+    roleData: myRoleData,
+    isHost,
+    gameHostPlayerId,
+    onNightEnd: ({ eliminatedPlayer }) => {
+      // Check win condition before transitioning to Day
+      const winner = checkWinCondition();
+      if (winner) {
+        console.log(`Game over! ${winner} win.`);
+        return;
+      }
+
+      const eliminatedName = eliminatedPlayer?.name || null;
+      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: eliminatedName });
+    },
+  });
 }
 
 /**
@@ -94,8 +141,8 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
         // Game over (game-over screen not yet implemented)
         console.log(`Game over! ${winner} win.`);
       } else {
-        // Transition to next Night (not yet implemented)
-        console.log('Day phase complete. Transitioning to Night phase...');
+        // Transition to next Night
+        startNightPhase({ channel, currentPlayer, isHost, app });
       }
     },
   });
@@ -117,6 +164,9 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
   const readySet = new Set();
   const totalPlayers = players.length;
 
+  // Track the game host's player id for night action targeting
+  gameHostPlayerId = players.find(p => p.isHost)?.id || null;
+
   // Listen for role assignment targeted to this player
   channel.on('broadcast', { event: 'role:assign' }, (msg) => {
     const payload = msg.payload;
@@ -124,6 +174,7 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
     if (payload.targetPlayerId !== currentPlayer.id) return;
 
     const roleData = payload.roleData;
+    myRoleData = roleData;
 
     showRoleReveal(app, roleData, currentPlayer.name, () => {
       // Player tapped Ready — broadcast to all
@@ -141,13 +192,24 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
     updateReadyStatus(readySet.size, totalPlayers);
 
     if (readySet.size >= totalPlayers) {
-      // All players ready — transition to Day (Night not yet implemented)
-      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
+      // All players ready — transition to Night (first phase after role reveal)
+      startNightPhase({ channel, currentPlayer, isHost, app });
     }
   });
 
-  // Non-host: listen for Day phase broadcast from host
+  // Non-host: listen for phase broadcasts from host
   if (!isHost) {
+    channel.on('broadcast', { event: 'phase:night' }, (msg) => {
+      if (msg.payload.players) {
+        gameState = {
+          phase: 'night',
+          players: msg.payload.players,
+          roles: {},
+        };
+      }
+      startNightPhase({ channel, currentPlayer, isHost, app });
+    });
+
     channel.on('broadcast', { event: 'phase:day-discuss' }, (msg) => {
       // Update local game state from host broadcast
       if (msg.payload.players) {
@@ -182,6 +244,9 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
       })),
       roles: assignments,
     };
+
+    // Store host's own role data for night phase
+    myRoleData = assignments[currentPlayer.id];
 
     // Broadcast each player's role via targeted messages
     // CRITICAL: each player only receives their own role

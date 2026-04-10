@@ -30,6 +30,17 @@
     </div>
   </template>
 
+  <!-- Night phase screen template (populated dynamically by src/phases/night.js) -->
+  <template id="tmpl-night">
+    <div id="screen-night" class="screen active night-screen">
+      <h1 class="night-header"></h1>
+      <div id="night-timer-container"></div>
+      <div class="night-targets" id="night-targets"></div>
+      <button class="btn night-confirm" id="night-confirm" disabled>Confirm</button>
+      <p class="night-status" id="night-status"></p>
+    </div>
+  </template>
+
   <!-- Day discussion screen template -->
   <template id="tmpl-day-discuss">
     <div id="screen-day-discuss" class="screen">
