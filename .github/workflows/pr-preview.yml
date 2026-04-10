@@ -1,0 +1,109 @@
+name: PR Preview
+# Builds every PR and publishes it to gh-pages under /pr/<number>/.
+# On PR close, removes that PR's preview directory.
+# Deployed by the Stratos Games Factory — do not hand-edit.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish preview to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          destination_dir: pr/${{ github.event.pull_request.number }}
+          keep_files: true
+          commit_message: "preview: PR #${{ github.event.pull_request.number }} (${{ github.event.pull_request.head.sha }})"
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Comment with preview URL (idempotent)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request.number;
+            const url = `https://${context.repo.owner}.github.io/${context.repo.repo}/pr/${pr}/`;
+            const marker = '<!-- stratos-preview -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+              per_page: 100
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            const body = `${marker}\n🔍 **PR preview ready:** ${url}\n\nThis preview rebuilds on every push to the PR branch.\n\n_Last updated: ${new Date().toISOString()}_`;
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr,
+                body
+              });
+            }
+
+  cleanup:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gh-pages
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+
+      - name: Remove preview directory
+        if: steps.checkout.outcome == 'success'
+        run: |
+          set -e
+          dir="pr/${{ github.event.pull_request.number }}"
+          if [ -d "$dir" ]; then
+            git config user.email 'github-actions[bot]@users.noreply.github.com'
+            git config user.name 'github-actions[bot]'
+            rm -rf "$dir"
+            git add -A
+            if ! git diff --cached --quiet; then
+              git commit -m "cleanup: remove preview for PR #${{ github.event.pull_request.number }}"
+              git push
+            fi
+          else
+            echo "No preview directory $dir, nothing to clean."
+          fi
