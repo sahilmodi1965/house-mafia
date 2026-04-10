@@ -1,0 +1,126 @@
+name: Release
+# Triggered when someone adds the `ship-it` label to an issue or PR, or via
+# manual workflow_dispatch with a version input.
+# Builds, tags, deploys to gh-pages production root, creates a GitHub Release,
+# and announces on recently closed issues.
+# Deployed by the Stratos Games Factory — do not hand-edit.
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.2.0). Leave blank to auto-increment patch.'
+        required: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'ship-it' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Compute version
+        id: version
+        run: |
+          input='${{ github.event.inputs.version }}'
+          if [ -n "$input" ]; then
+            version="$input"
+          else
+            latest=$(git tag --list 'v*' --sort=-version:refname | head -1)
+            if [ -z "$latest" ]; then
+              version="v0.1.0"
+            else
+              ver=${latest#v}
+              IFS='.' read -r maj min pat <<< "$ver"
+              pat=$((pat + 1))
+              version="v${maj}.${min}.${pat}"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version"
+
+      - name: Install + build
+        run: |
+          npm install
+          npm run build
+
+      - name: Tag commit
+        run: |
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git config user.name 'github-actions[bot]'
+          git tag -a '${{ steps.version.outputs.version }}' -m 'Release ${{ steps.version.outputs.version }}'
+          git push origin '${{ steps.version.outputs.version }}'
+
+      - name: Deploy production build to gh-pages root
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          keep_files: true
+          commit_message: "release: ${{ steps.version.outputs.version }}"
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          prev=$(git tag --list 'v*' --sort=-version:refname | sed -n '2p')
+          if [ -z "$prev" ]; then
+            range="HEAD"
+          else
+            range="${prev}..HEAD"
+          fi
+          {
+            echo "changelog<<__EOF__"
+            git log --pretty=format:'- %s (%an)' "$range" | head -50
+            echo
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          notes_file=$(mktemp)
+          {
+            printf '%s\n\n' "$CHANGELOG"
+            printf 'Built and released by the Stratos Games Factory.\n'
+          } > "$notes_file"
+          gh release create '${{ steps.version.outputs.version }}' \
+            --repo "${{ github.repository }}" \
+            --title 'Release ${{ steps.version.outputs.version }}' \
+            --notes-file "$notes_file"
+          rm -f "$notes_file"
+
+      - name: Announce on recently closed issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --repo "${{ github.repository }}" --state closed --limit 100 \
+            --json number,closedAt,labels \
+            --jq '.[] | select((.closedAt | fromdateiso8601) > (now - 604800))
+                       | select((.labels | map(.name)) as $l | ($l | index("done")) or ($l | index("auto-merged")))
+                       | .number' \
+          | while read -r num; do
+            [ -z "$num" ] && continue
+            gh issue comment "$num" --repo "${{ github.repository }}" \
+              --body "🚀 Shipped in release **${{ steps.version.outputs.version }}**" || true
+          done
