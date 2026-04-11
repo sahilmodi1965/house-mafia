@@ -14,8 +14,11 @@ permissions:
   issues: write
 
 concurrency:
-  group: pr-preview-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  # Shared group across ALL PRs to serialize gh-pages pushes.
+  # Without this, parallel PR pushes race on git push to gh-pages and some fail
+  # with "rejected — fetch first". cancel-in-progress: false queues runs instead.
+  group: gh-pages-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
