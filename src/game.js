@@ -2,6 +2,14 @@ import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
+import {
+  incrementGameCount,
+  shouldShowInterstitial,
+  showInterstitial,
+  canShowRewarded,
+  showRewardedVideo,
+  showBanner,
+} from './ads.js';
 
 /**
  * Game loop orchestration.
@@ -11,6 +19,9 @@ import { showVoting } from './phases/vote.js';
 
 /** Game state — authoritative on the host's client */
 let gameState = null;
+
+/** Whether the current player has earned a rewarded flair this session */
+let hasRewardedFlair = false;
 
 /**
  * Check win conditions after an elimination.
@@ -25,6 +36,85 @@ function checkWinCondition() {
   if (mafiaAlive === 0) return 'guests';
   if (mafiaAlive >= nonMafiaAlive) return 'mafia';
   return null;
+}
+
+/**
+ * Show the game-over screen with role reveal, rewarded video button,
+ * and play-again button (with interstitial check).
+ * @param {Object} opts
+ * @param {string} opts.winner - 'mafia' | 'guests'
+ * @param {HTMLElement} opts.app
+ */
+function showGameOver({ winner, app }) {
+  incrementGameCount();
+
+  const winnerText =
+    winner === 'mafia' ? 'Mafia Wins!' : 'Guests Win!';
+
+  const playerRows = gameState.players
+    .map((p) => {
+      const alive = p.alive ? '' : ' (eliminated)';
+      const flair = hasRewardedFlair ? ' class="player-item player-item--flair"' : ' class="player-item"';
+      return `<li${flair}>${p.role.emoji} ${p.name} — ${p.role.name}${alive}</li>`;
+    })
+    .join('');
+
+  const showRewardBtn = canShowRewarded() && !hasRewardedFlair;
+
+  app.innerHTML = `
+    <div id="screen-game-over" class="screen active">
+      <h1>${winnerText}</h1>
+      <ul class="player-list">${playerRows}</ul>
+      ${
+        showRewardBtn
+          ? '<button class="btn btn--rewarded" id="btn-rewarded">Watch ad for custom skin</button>'
+          : ''
+      }
+      <button class="btn btn--pink" id="btn-play-again">Play Again</button>
+    </div>
+  `;
+
+  if (showRewardBtn) {
+    document.getElementById('btn-rewarded').addEventListener('click', () => {
+      const btn = document.getElementById('btn-rewarded');
+      if (btn) btn.disabled = true;
+      showRewardedVideo(
+        () => {
+          // Reward: session-only visual flair
+          hasRewardedFlair = true;
+          if (btn) btn.textContent = 'Flair earned!';
+          // Re-render player list with flair
+          const listEl = app.querySelector('.player-list');
+          if (listEl) {
+            listEl.innerHTML = gameState.players
+              .map((p) => {
+                const alive = p.alive ? '' : ' (eliminated)';
+                return `<li class="player-item player-item--flair">${p.role.emoji} ${p.name} — ${p.role.name}${alive}</li>`;
+              })
+              .join('');
+          }
+        },
+        () => {
+          // Skipped
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Watch ad for custom skin';
+          }
+        },
+      );
+    });
+  }
+
+  document.getElementById('btn-play-again').addEventListener('click', async () => {
+    if (shouldShowInterstitial()) {
+      await showInterstitial();
+    }
+    // Return to lobby with banner
+    showBanner('ad-banner');
+    // Trigger lobby return — reload title screen for now
+    // (game:start / lobby re-entry is handled by room.js via the title screen)
+    window.location.reload();
+  });
 }
 
 /**
@@ -91,8 +181,7 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
 
       const winner = checkWinCondition();
       if (winner) {
-        // Game over (game-over screen not yet implemented)
-        console.log(`Game over! ${winner} win.`);
+        showGameOver({ winner, app });
       } else {
         // Transition to next Night (not yet implemented)
         console.log('Day phase complete. Transitioning to Night phase...');

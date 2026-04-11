@@ -1,5 +1,6 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
+import { showBanner, hideBanner } from './ads.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -184,6 +185,7 @@ async function subscribeToRoom(app, onBack) {
         // Handled by sync
       })
       .on('broadcast', { event: 'game:start' }, () => {
+        hideBanner();
         startGame({
           channel,
           players: [...players],
@@ -243,7 +245,10 @@ function showLobby(app, onBack) {
     </div>
   `;
 
+  showBanner('ad-banner');
+
   document.getElementById('btn-leave-lobby').addEventListener('click', () => {
+    hideBanner();
     cleanup();
     onBack();
   });
@@ -277,6 +282,7 @@ function renderLobby() {
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
       startBtn.addEventListener('click', () => {
+        hideBanner();
         channel.send({
           type: 'broadcast',
           event: 'game:start',
