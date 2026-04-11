@@ -1,5 +1,6 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
+import { showBanner, hideBanner } from './ads.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -168,6 +169,13 @@ async function subscribeToRoom(app, onBack) {
     config: { presence: { key: currentPlayer.id } },
   });
 
+  // Listen for game over → return to lobby
+  const returnHandler = () => {
+    window.removeEventListener('game:return-to-lobby', returnHandler);
+    showLobby(app, onBack);
+  };
+  window.addEventListener('game:return-to-lobby', returnHandler);
+
   // Wait for subscribe to complete, then check presence for join validation
   await new Promise((resolve, reject) => {
     channel
@@ -184,6 +192,7 @@ async function subscribeToRoom(app, onBack) {
         // Handled by sync
       })
       .on('broadcast', { event: 'game:start' }, () => {
+        hideBanner('ad-banner');
         startGame({
           channel,
           players: [...players],
@@ -243,7 +252,11 @@ function showLobby(app, onBack) {
     </div>
   `;
 
+  // Show lobby banner ad
+  showBanner('ad-banner');
+
   document.getElementById('btn-leave-lobby').addEventListener('click', () => {
+    hideBanner('ad-banner');
     cleanup();
     onBack();
   });
@@ -277,6 +290,7 @@ function renderLobby() {
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
       startBtn.addEventListener('click', () => {
+        hideBanner('ad-banner');
         channel.send({
           type: 'broadcast',
           event: 'game:start',
@@ -300,6 +314,7 @@ function renderLobby() {
 // --- Cleanup ---
 
 function cleanup() {
+  hideBanner('ad-banner');
   if (channel) {
     channel.unsubscribe();
     channel = null;

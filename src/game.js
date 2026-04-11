@@ -2,6 +2,15 @@ import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
+import {
+  canShowRewarded,
+  showRewardedVideo,
+  shouldShowInterstitial,
+  showInterstitial,
+  showBanner,
+  hideBanner,
+  recordGameCompleted,
+} from './ads.js';
 
 /**
  * Game loop orchestration.
@@ -91,13 +100,85 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
 
       const winner = checkWinCondition();
       if (winner) {
-        // Game over (game-over screen not yet implemented)
-        console.log(`Game over! ${winner} win.`);
+        recordGameCompleted();
+        showGameOver({ app, winner, players: gameState.players, currentPlayer });
       } else {
         // Transition to next Night (not yet implemented)
         console.log('Day phase complete. Transitioning to Night phase...');
       }
     },
+  });
+}
+
+/** Session-only gold text flair earned from rewarded video */
+let hasGoldFlair = false;
+
+/** @returns {boolean} Whether the player has the gold flair this session */
+export function getHasGoldFlair() {
+  return hasGoldFlair;
+}
+
+/**
+ * Show the game over screen with role reveals and optional rewarded video button.
+ */
+function showGameOver({ app, winner, players, currentPlayer }) {
+  const winnerLabel = winner === 'mafia' ? 'Mafia Wins!' : 'Guests Win!';
+
+  const playerRows = players
+    .map((p) => {
+      const alive = p.alive ? '' : ' (eliminated)';
+      const flairClass = hasGoldFlair && p.id === currentPlayer.id ? ' flair-gold' : '';
+      return `<li class="player-item${flairClass}">${p.name} — ${p.role.name}${alive}</li>`;
+    })
+    .join('');
+
+  const showRewardBtn = canShowRewarded() && !hasGoldFlair;
+
+  app.innerHTML = `
+    <div id="screen-game-over" class="screen active">
+      <h1>${winnerLabel}</h1>
+      <ul class="player-list">${playerRows}</ul>
+      ${
+        showRewardBtn
+          ? '<button class="btn btn--rewarded" id="btn-rewarded">Watch ad for gold skin</button>'
+          : ''
+      }
+      <button class="btn btn--pink" id="btn-play-again">Play Again</button>
+    </div>
+  `;
+
+  if (showRewardBtn) {
+    document.getElementById('btn-rewarded').addEventListener('click', () => {
+      const btn = document.getElementById('btn-rewarded');
+      if (btn) btn.disabled = true;
+      showRewardedVideo(
+        () => {
+          // Reward: session-only gold text flair
+          hasGoldFlair = true;
+          if (btn) btn.remove();
+          // Apply flair to current player's name in the list
+          const items = app.querySelectorAll('.player-item');
+          items.forEach((item) => {
+            if (item.textContent.startsWith(currentPlayer.name)) {
+              item.classList.add('flair-gold');
+            }
+          });
+        },
+        () => {
+          // Skipped — re-enable button
+          if (btn) btn.disabled = false;
+        },
+      );
+    });
+  }
+
+  document.getElementById('btn-play-again').addEventListener('click', async () => {
+    // Show interstitial before returning to lobby if due
+    if (shouldShowInterstitial()) {
+      await showInterstitial();
+    }
+    // Signal return to lobby — dispatch custom event that room.js can listen for
+    window.dispatchEvent(new CustomEvent('game:return-to-lobby'));
   });
 }
 
