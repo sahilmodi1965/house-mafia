@@ -388,3 +388,80 @@ h1 {
   font-size: 1.125rem;
   margin-bottom: 1rem;
 }
+
+/* --- Ad banner (bottom of lobby) --- */
+
+#ad-banner {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 50px;
+  background-color: var(--surface);
+  border-top: 1px solid var(--neon-cyan);
+  justify-content: center;
+  align-items: center;
+  z-index: 100;
+}
+
+#ad-banner.visible {
+  display: flex;
+}
+
+.ad-banner__text {
+  font-size: 0.875rem;
+  color: var(--neon-cyan);
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* --- Ad overlay (full-screen interstitial / rewarded) --- */
+
+#ad-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.9);
+  justify-content: center;
+  align-items: center;
+  z-index: 200;
+}
+
+#ad-overlay.visible {
+  display: flex;
+}
+
+.ad-overlay__content {
+  text-align: center;
+}
+
+.ad-overlay__label {
+  font-size: 1.25rem;
+  color: var(--neon-yellow);
+  margin-bottom: 1rem;
+}
+
+.ad-overlay__timer {
+  font-size: 3rem;
+  font-weight: 900;
+  color: var(--neon-cyan);
+}
+
+/* --- Rewarded video button (game over screen) --- */
+
+.btn--rewarded {
+  background-color: var(--neon-yellow);
+  color: var(--bg);
+}
+
+.btn--rewarded:disabled {
+  opacity: 0.3;
+}
+
+/* --- Gold text flair (rewarded ad reward) --- */
+
+.flair-gold {
+  color: var(--neon-yellow) !important;
+  text-shadow: 0 0 8px var(--neon-yellow);
+}
