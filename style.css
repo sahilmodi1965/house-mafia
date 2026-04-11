@@ -1,10 +1,13 @@
 :root {
   --bg: #0a0a0f;
+  --bg-end: #1a1a2e;
   --neon-pink: #ff2d7b;
   --neon-cyan: #00f0ff;
   --neon-yellow: #ffe156;
   --text: #ffffff;
-  --surface: #1a1a2e;
+  --surface: rgba(255, 255, 255, 0.06);
+  --surface-border: rgba(255, 255, 255, 0.12);
+  --glass-blur: 12px;
 }
 
 *,
@@ -18,7 +21,8 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
     Helvetica, Arial, sans-serif;
-  background-color: var(--bg);
+  background: linear-gradient(180deg, var(--bg) 0%, var(--bg-end) 100%);
+  background-attachment: fixed;
   color: var(--text);
   min-height: 100dvh;
   display: flex;
@@ -28,9 +32,20 @@ body {
 
 #app {
   width: 100%;
-  max-width: 480px;
+  max-width: 428px;
+  min-width: 320px;
   padding: 1rem;
   text-align: center;
+  /* Screen transition support */
+  transition: opacity 100ms ease;
+}
+
+#app.screen-exit {
+  opacity: 0;
+}
+
+#app.screen-enter {
+  opacity: 1;
 }
 
 h1 {
@@ -43,31 +58,42 @@ h1 {
   background-clip: text;
 }
 
+/* --- Neon glow buttons --- */
+
 .btn {
   display: block;
   width: 100%;
-  min-height: 44px;
-  padding: 0.75rem 1.5rem;
+  min-height: 48px;
+  padding: 0.875rem 1.5rem;
   margin-bottom: 1rem;
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   font-size: 1.125rem;
   font-weight: 700;
   cursor: pointer;
   color: var(--bg);
-  transition: opacity 0.2s;
+  transition: opacity 150ms ease, box-shadow 150ms ease, transform 100ms ease;
 }
 
 .btn:active {
-  opacity: 0.8;
+  opacity: 0.85;
+  transform: scale(0.97);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .btn--pink {
   background-color: var(--neon-pink);
+  box-shadow: 0 0 16px rgba(255, 45, 123, 0.4), 0 0 40px rgba(255, 45, 123, 0.15);
 }
 
 .btn--cyan {
   background-color: var(--neon-cyan);
+  box-shadow: 0 0 16px rgba(0, 240, 255, 0.4), 0 0 40px rgba(0, 240, 255, 0.15);
 }
 
 .screen {
@@ -77,6 +103,8 @@ h1 {
 .screen.active {
   display: block;
 }
+
+/* --- Glass-morphism cards / inputs --- */
 
 .input-label {
   display: block;
@@ -90,20 +118,23 @@ h1 {
 .input {
   display: block;
   width: 100%;
-  min-height: 44px;
+  min-height: 48px;
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
-  border: 2px solid var(--surface);
-  border-radius: 8px;
-  background-color: var(--surface);
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
   color: var(--text);
   font-size: 1.125rem;
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .input:focus {
   border-color: var(--neon-cyan);
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
 }
 
 .error-text {
@@ -112,6 +143,8 @@ h1 {
   min-height: 1.25rem;
   margin-bottom: 0.5rem;
 }
+
+/* --- Lobby --- */
 
 .room-code-display {
   font-size: 1.25rem;
@@ -122,6 +155,7 @@ h1 {
   font-weight: 900;
   letter-spacing: 0.25em;
   color: var(--neon-yellow);
+  text-shadow: 0 0 8px rgba(255, 225, 86, 0.5);
 }
 
 .player-count {
@@ -136,10 +170,13 @@ h1 {
 }
 
 .player-item {
-  padding: 0.625rem 1rem;
+  padding: 0.75rem 1rem;
   margin-bottom: 0.375rem;
-  background-color: var(--surface);
-  border-radius: 6px;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
   font-size: 1rem;
   text-align: left;
 }
@@ -157,11 +194,6 @@ h1 {
   margin-bottom: 1rem;
 }
 
-.btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 /* --- Role reveal screen --- */
 
 .role-card {
@@ -175,7 +207,7 @@ h1 {
   position: relative;
   width: 100%;
   height: 100%;
-  transition: transform 0.2s ease-in-out;
+  transition: transform 200ms ease-in-out;
   transform-style: preserve-3d;
 }
 
@@ -194,11 +226,15 @@ h1 {
   border-radius: 16px;
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--surface-border);
 }
 
 .role-card__front {
-  background-color: var(--surface);
-  border: 2px solid var(--neon-cyan);
+  border-color: var(--neon-cyan);
+  box-shadow: 0 0 20px rgba(0, 240, 255, 0.2);
 }
 
 .role-card__question {
@@ -208,9 +244,9 @@ h1 {
 }
 
 .role-card__back {
-  background-color: var(--surface);
-  border: 2px solid var(--role-color, var(--neon-pink));
+  border-color: var(--role-color, var(--neon-pink));
   transform: rotateY(180deg);
+  box-shadow: 0 0 20px rgba(255, 45, 123, 0.2);
 }
 
 .role-card__emoji {
@@ -230,7 +266,7 @@ h1 {
   margin-bottom: 1.5rem;
   padding: 0 1rem;
   line-height: 1.5;
-  transition: opacity 0.2s ease-in-out;
+  transition: opacity 200ms ease-in-out;
 }
 
 .ready-status {
@@ -240,25 +276,43 @@ h1 {
   min-height: 1.25rem;
 }
 
-/* --- Timer component --- */
+/* --- Circular role badges --- */
+
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--role-color, var(--neon-pink));
+  font-size: 1.5rem;
+  box-shadow: 0 0 12px rgba(255, 45, 123, 0.3);
+}
+
+/* --- Timer component (monospace + red pulse) --- */
 
 .timer {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   font-size: 3rem;
   font-weight: 900;
   color: var(--neon-cyan);
   text-align: center;
   margin: 1rem auto;
   min-width: 80px;
+  letter-spacing: 0.05em;
 }
 
 .timer--warning {
   color: var(--neon-pink);
-  animation: timer-pulse 0.5s ease-in-out infinite alternate;
+  text-shadow: 0 0 12px rgba(255, 45, 123, 0.6);
+  animation: timer-pulse-red 0.5s ease-in-out infinite alternate;
 }
 
-@keyframes timer-pulse {
-  from { opacity: 1; transform: scale(1); }
-  to { opacity: 0.6; transform: scale(1.1); }
+@keyframes timer-pulse-red {
+  from { opacity: 1; transform: scale(1); text-shadow: 0 0 12px rgba(255, 45, 123, 0.6); }
+  to { opacity: 0.6; transform: scale(1.08); text-shadow: 0 0 24px rgba(255, 45, 123, 0.9); }
 }
 
 /* --- Day discussion screen --- */
@@ -268,8 +322,11 @@ h1 {
   color: var(--neon-yellow);
   margin-bottom: 1rem;
   padding: 0.75rem;
-  background-color: var(--surface);
-  border-radius: 8px;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
   line-height: 1.4;
 }
 
@@ -279,17 +336,22 @@ h1 {
 }
 
 .day-player-item {
-  padding: 0.5rem 1rem;
+  padding: 0.625rem 1rem;
   margin-bottom: 0.25rem;
-  background-color: var(--surface);
-  border-radius: 6px;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
   font-size: 0.9375rem;
   text-align: left;
+  transition: opacity 150ms ease, filter 150ms ease;
 }
 
 .day-player-item--dead {
   opacity: 0.4;
   text-decoration: line-through;
+  filter: grayscale(1);
 }
 
 .day-player-status {
@@ -305,8 +367,11 @@ h1 {
 }
 
 .day-chat__messages {
-  background-color: var(--surface);
-  border-radius: 8px;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--surface-border);
+  border-radius: 12px;
   padding: 0.5rem;
   height: 120px;
   overflow-y: auto;
@@ -350,16 +415,19 @@ h1 {
 
 .vote-btn {
   margin-bottom: 0.5rem;
+  min-height: 48px;
 }
 
 .vote-btn--selected {
   background-color: var(--neon-yellow);
   color: var(--bg);
+  box-shadow: 0 0 16px rgba(255, 225, 86, 0.5);
 }
 
 .vote-btn--disabled {
   opacity: 0.4;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .vote-status {
@@ -387,4 +455,111 @@ h1 {
 .vote-result-role {
   font-size: 1.125rem;
   margin-bottom: 1rem;
+}
+
+/* --- Elimination slide-down animation --- */
+
+.slide-down {
+  animation: slide-down-in 200ms ease-out;
+}
+
+@keyframes slide-down-in {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Night/Day color wash transitions --- */
+
+body {
+  transition: background 200ms ease;
+}
+
+body.phase-night {
+  background: linear-gradient(180deg, #050510 0%, #0a0a1e 100%);
+}
+
+body.phase-day {
+  background: linear-gradient(180deg, #0f0f1a 0%, #1e1e38 100%);
+}
+
+/* --- Eliminated players: grayscale --- */
+
+.player-item--eliminated,
+.day-player-item--dead {
+  filter: grayscale(1);
+  opacity: 0.4;
+}
+
+/* --- Mute toggle button --- */
+
+.btn-mute {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--surface-border);
+  border-radius: 50%;
+  background: var(--surface);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  color: var(--text);
+  font-size: 1.25rem;
+  cursor: pointer;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 150ms ease;
+}
+
+.btn-mute:active {
+  opacity: 0.7;
+}
+
+/* --- Mobile-first responsive (375-428px) --- */
+
+@media (max-width: 428px) {
+  #app {
+    padding: 0.75rem;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+
+  .timer {
+    font-size: 2.5rem;
+  }
+
+  .role-card {
+    width: 180px;
+    height: 252px;
+  }
+}
+
+@media (max-width: 375px) {
+  #app {
+    padding: 0.5rem;
+  }
+
+  h1 {
+    font-size: 1.75rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .btn {
+    font-size: 1rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .timer {
+    font-size: 2.25rem;
+  }
 }
