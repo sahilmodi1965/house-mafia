@@ -1,5 +1,7 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
+import { playSound } from '../audio.js';
+import { transitionScreen } from '../ui/screens.js';
 
 /**
  * Day discussion phase.
@@ -34,7 +36,7 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
     ? `<p class="day-announcement">During the night, <strong>${eliminatedName}</strong> was eliminated.</p>`
     : `<p class="day-announcement">No one was eliminated during the night.</p>`;
 
-  app.innerHTML = `
+  const dayHTML = `
     <div id="screen-day-discuss" class="screen active">
       <h1>Day -- Discuss!</h1>
       ${announcementHTML}
@@ -52,9 +54,13 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
     </div>
   `;
 
+  transitionScreen(app, dayHTML);
+
   // Timer
   const timerContainer = document.getElementById('day-timer-container');
-  const timer = createTimer(GAME.DISCUSSION_DURATION, null, () => {
+  const timer = createTimer(GAME.DISCUSSION_DURATION, (remaining) => {
+    if (remaining <= 10 && remaining > 0) playSound('tick');
+  }, () => {
     if (onDiscussionEnd) onDiscussionEnd();
   });
   timerContainer.appendChild(timer.el);
