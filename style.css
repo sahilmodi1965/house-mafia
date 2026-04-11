@@ -388,3 +388,90 @@ h1 {
   font-size: 1.125rem;
   margin-bottom: 1rem;
 }
+
+/* --- Ad containers --- */
+
+#ad-banner {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 50px;
+  background-color: var(--surface);
+  border-top: 1px solid var(--neon-cyan);
+  z-index: 900;
+  text-align: center;
+  align-items: center;
+  justify-content: center;
+}
+
+#ad-banner.ad-banner--visible {
+  display: flex;
+}
+
+.ad-banner__text {
+  font-size: 0.875rem;
+  color: var(--neon-cyan);
+  opacity: 0.6;
+}
+
+#ad-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.9);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+
+#ad-overlay.ad-overlay--visible {
+  display: flex;
+}
+
+.ad-overlay__content {
+  text-align: center;
+  padding: 2rem;
+}
+
+.ad-overlay__label {
+  font-size: 1.25rem;
+  color: var(--neon-yellow);
+  margin-bottom: 1rem;
+}
+
+.ad-overlay__timer {
+  font-size: 3rem;
+  font-weight: 900;
+  color: var(--neon-cyan);
+}
+
+/* --- Rewarded flair (session-only) --- */
+
+.player-item--flair {
+  position: relative;
+}
+
+.player-item--flair::before {
+  content: '\2605';
+  color: var(--neon-yellow);
+  margin-right: 0.5rem;
+}
+
+.player-item--flair .player-item__name {
+  color: var(--neon-yellow);
+  font-weight: 900;
+}
+
+/* --- Game over rewarded button --- */
+
+.btn--rewarded {
+  background-color: var(--neon-yellow);
+  color: var(--bg);
+}
+
+.btn--rewarded:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
