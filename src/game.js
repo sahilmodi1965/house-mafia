@@ -1,5 +1,5 @@
 import { assignRoles } from './roles.js';
-import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
+import { showRoleReveal, updateReadyStatus, showGameOver, showSpectatorBanner, hideSpectatorBanner } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 
@@ -28,6 +28,35 @@ function checkWinCondition() {
 }
 
 /**
+ * Handle game over — broadcast result and show game over screen.
+ * Called by the host after a win condition is detected.
+ */
+function handleGameOver({ winner, channel, currentPlayer, isHost, app, onPlayAgain }) {
+  if (isHost) {
+    channel.send({
+      type: 'broadcast',
+      event: 'game:over',
+      payload: {
+        winner,
+        players: gameState.players,
+        roundNumber: gameState.roundNumber,
+        eliminatedCount: gameState.eliminatedCount,
+      },
+    });
+  }
+
+  hideSpectatorBanner();
+  showGameOver(app, {
+    winner,
+    players: gameState.players,
+    roundNumber: gameState.roundNumber,
+    eliminatedCount: gameState.eliminatedCount,
+    isHost,
+    onPlayAgain,
+  });
+}
+
+/**
  * Start the Day phase (discussion + voting).
  * @param {Object} opts
  * @param {Object} opts.channel - Supabase Realtime channel
@@ -35,8 +64,17 @@ function checkWinCondition() {
  * @param {boolean} opts.isHost
  * @param {HTMLElement} opts.app
  * @param {string|null} opts.nightEliminatedName - Name eliminated during night
+ * @param {Function} opts.onPlayAgain - Called for play-again flow
  */
-function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName }) {
+function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName, onPlayAgain }) {
+  const currentPlayerData = gameState.players.find(p => p.id === currentPlayer.id);
+  const isAlive = currentPlayerData ? currentPlayerData.alive : false;
+
+  // Show spectator banner for eliminated players
+  if (!isAlive) {
+    showSpectatorBanner();
+  }
+
   if (isHost) {
     gameState.phase = 'day-discuss';
     channel.send({
@@ -57,14 +95,14 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
     isHost,
     eliminatedName: nightEliminatedName,
     onDiscussionEnd: () => {
-      startVotePhase({ channel, currentPlayer, isHost, app });
+      startVotePhase({ channel, currentPlayer, isHost, app, onPlayAgain });
     },
   });
 
   // Non-host listens for vote transition
   if (!isHost) {
     channel.on('broadcast', { event: 'phase:day-vote' }, () => {
-      startVotePhase({ channel, currentPlayer, isHost, app });
+      startVotePhase({ channel, currentPlayer, isHost, app, onPlayAgain });
     });
   }
 }
@@ -72,7 +110,7 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
 /**
  * Start the voting sub-phase of Day.
  */
-function startVotePhase({ channel, currentPlayer, isHost, app }) {
+function startVotePhase({ channel, currentPlayer, isHost, app, onPlayAgain }) {
   if (isHost) {
     gameState.phase = 'day-vote';
   }
@@ -84,18 +122,33 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
     currentPlayer,
     isHost,
     onVoteResult: (result) => {
-      if (result.eliminatedPlayer && isHost) {
+      // Only the host runs game logic after a vote
+      if (!isHost) return;
+
+      if (result.eliminatedPlayer) {
         const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
-        if (target) target.alive = false;
+        if (target) {
+          target.alive = false;
+          gameState.eliminatedCount++;
+        }
       }
 
+      // Check win condition after day vote elimination
       const winner = checkWinCondition();
       if (winner) {
-        // Game over (game-over screen not yet implemented)
-        console.log(`Game over! ${winner} win.`);
+        handleGameOver({ winner, channel, currentPlayer, isHost, app, onPlayAgain });
       } else {
-        // Transition to next Night (not yet implemented)
-        console.log('Day phase complete. Transitioning to Night phase...');
+        // Increment round and transition to next phase
+        gameState.roundNumber++;
+        // Night phase not yet implemented — go back to Day for now
+        startDayPhase({
+          channel,
+          currentPlayer,
+          isHost,
+          app,
+          nightEliminatedName: null,
+          onPlayAgain,
+        });
       }
     },
   });
@@ -112,10 +165,13 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
  * @param {Object} opts.currentPlayer - { id, name, isHost }
  * @param {boolean} opts.isHost - Whether this client is the game host
  * @param {HTMLElement} opts.app - Root app element
+ * @param {Function} opts.onPlayAgain - Called to return to lobby for play-again
  */
-export function startGame({ channel, players, currentPlayer, isHost, app }) {
+export function startGame({ channel, players, currentPlayer, isHost, app, onPlayAgain }) {
   const readySet = new Set();
   const totalPlayers = players.length;
+
+  hideSpectatorBanner();
 
   // Listen for role assignment targeted to this player
   channel.on('broadcast', { event: 'role:assign' }, (msg) => {
@@ -142,7 +198,14 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
 
     if (readySet.size >= totalPlayers) {
       // All players ready — transition to Day (Night not yet implemented)
-      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
+      startDayPhase({
+        channel,
+        currentPlayer,
+        isHost,
+        app,
+        nightEliminatedName: null,
+        onPlayAgain,
+      });
     }
   });
 
@@ -155,6 +218,8 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
           phase: 'day-discuss',
           players: msg.payload.players,
           roles: {},
+          roundNumber: gameState ? gameState.roundNumber : 1,
+          eliminatedCount: gameState ? gameState.eliminatedCount : 0,
         };
       }
       startDayPhase({
@@ -163,7 +228,40 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
         isHost,
         app,
         nightEliminatedName: msg.payload.eliminatedName,
+        onPlayAgain,
       });
+    });
+
+    // Non-host: listen for game over from host
+    channel.on('broadcast', { event: 'game:over' }, (msg) => {
+      const { winner, players: allPlayers, roundNumber, eliminatedCount } = msg.payload;
+      gameState = {
+        phase: 'gameover',
+        players: allPlayers,
+        roles: {},
+        roundNumber,
+        eliminatedCount,
+      };
+      hideSpectatorBanner();
+      showGameOver(app, {
+        winner,
+        players: allPlayers,
+        roundNumber,
+        eliminatedCount,
+        isHost,
+        onPlayAgain,
+      });
+    });
+
+    // Non-host: listen for vote results to update local state
+    channel.on('broadcast', { event: 'phase:day-result' }, (msg) => {
+      if (msg.payload.eliminatedPlayerId && gameState) {
+        const target = gameState.players.find(p => p.id === msg.payload.eliminatedPlayerId);
+        if (target) {
+          target.alive = false;
+          gameState.eliminatedCount = (gameState.eliminatedCount || 0) + 1;
+        }
+      }
     });
   }
 
@@ -181,6 +279,8 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
         alive: true,
       })),
       roles: assignments,
+      roundNumber: 1,
+      eliminatedCount: 0,
     };
 
     // Broadcast each player's role via targeted messages
@@ -202,4 +302,9 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
 /** Get the current game state (host only) */
 export function getGameState() {
   return gameState;
+}
+
+/** Reset game state (used by play-again) */
+export function resetGameState() {
+  gameState = null;
 }

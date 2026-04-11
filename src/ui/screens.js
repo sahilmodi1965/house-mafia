@@ -1,8 +1,7 @@
 import { ROLES } from '../roles.js';
 
 /**
- * Role reveal screen — shows each player their assigned role
- * with a card flip animation. Handles "Ready" acknowledgement.
+ * Screen components: role reveal, game over overlay, spectator banner.
  */
 
 /**
@@ -83,4 +82,78 @@ export function updateReadyStatus(readyCount, totalCount) {
   if (el) {
     el.textContent = `${readyCount}/${totalCount} ready`;
   }
+}
+
+/**
+ * Show the game over screen with full role reveal and stats.
+ * @param {HTMLElement} app - Root app element
+ * @param {Object} opts
+ * @param {string} opts.winner - 'mafia' | 'guests'
+ * @param {Array} opts.players - Array of { id, name, role, alive }
+ * @param {number} opts.roundNumber - How many rounds the game lasted
+ * @param {number} opts.eliminatedCount - Total players eliminated
+ * @param {boolean} opts.isHost - Whether this client is the game host
+ * @param {Function} opts.onPlayAgain - Called when Play Again is pressed
+ */
+export function showGameOver(app, { winner, players, roundNumber, eliminatedCount, isHost, onPlayAgain }) {
+  const isMafiaWin = winner === 'mafia';
+  const headerText = isMafiaWin ? 'Mafia Wins!' : 'Guests Win!';
+  const headerColor = isMafiaWin ? 'var(--neon-pink)' : 'var(--neon-cyan)';
+
+  const roleColor = (role) => {
+    if (role.id === 'mafia') return 'var(--neon-pink)';
+    if (role.id === 'host') return 'var(--neon-cyan)';
+    return 'var(--neon-yellow)';
+  };
+
+  const playerListHTML = players.map(p => {
+    const color = roleColor(p.role);
+    const deadClass = p.alive ? '' : ' gameover-player--dead';
+    const statusText = p.alive ? 'Alive' : 'Eliminated';
+    return `<li class="gameover-player${deadClass}">
+      <span class="gameover-player__name" style="color: ${color}">${p.role.emoji} ${p.name}</span>
+      <span class="gameover-player__role" style="color: ${color}">${p.role.name}</span>
+      <span class="gameover-player__status">${statusText}</span>
+    </li>`;
+  }).join('');
+
+  app.innerHTML = `
+    <div id="screen-gameover" class="screen active gameover-screen">
+      <h1 class="gameover-header" style="color: ${headerColor}; -webkit-text-fill-color: ${headerColor};">${headerText}</h1>
+      <ul class="gameover-players">${playerListHTML}</ul>
+      <div class="gameover-stats">
+        <p>Game lasted <strong>${roundNumber}</strong> round${roundNumber !== 1 ? 's' : ''}</p>
+        <p><strong>${eliminatedCount}</strong> player${eliminatedCount !== 1 ? 's' : ''} eliminated</p>
+      </div>
+      <button class="btn btn--pink" id="btn-play-again">Play Again</button>
+    </div>
+  `;
+
+  document.getElementById('btn-play-again').addEventListener('click', () => {
+    if (onPlayAgain) onPlayAgain();
+  });
+}
+
+/**
+ * Show a spectator banner for eliminated players.
+ * Inserts a fixed banner at the top of the current screen.
+ */
+export function showSpectatorBanner() {
+  // Remove existing banner if any
+  const existing = document.getElementById('spectator-banner');
+  if (existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'spectator-banner';
+  banner.className = 'spectator-banner';
+  banner.textContent = 'You were eliminated — spectating';
+  document.body.prepend(banner);
+}
+
+/**
+ * Remove the spectator banner (e.g. on game over or play again).
+ */
+export function hideSpectatorBanner() {
+  const existing = document.getElementById('spectator-banner');
+  if (existing) existing.remove();
 }
