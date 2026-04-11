@@ -5,7 +5,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const port = Number(process.env.PORT || 4173);
-const baseURL = process.env.BASE_URL || `http://127.0.0.1:${port}`;
+// Must include Vite's `base` path so the webServer readiness check gets HTTP 200
+// (vite preview only serves content under the configured base, root returns 404).
+const basePath = process.env.BASE_PATH || '/house-mafia/';
+const baseURL = process.env.BASE_URL || `http://127.0.0.1:${port}${basePath}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
