@@ -8,3 +8,9 @@ export const GAME = {
   VOTE_DURATION: 20,
   ROOM_CODE_LENGTH: 4,
 };
+
+export const ADS = {
+  INTERSTITIAL_EVERY_N_GAMES: 3,
+  FIRST_AD_AFTER_MINUTES: 2,
+  REWARDED_COOLDOWN: 60,
+};
