@@ -1,5 +1,6 @@
 import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
+import { showNight, setupNightListeners, resetNightActions } from './phases/night.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 
@@ -25,6 +26,65 @@ function checkWinCondition() {
   if (mafiaAlive === 0) return 'guests';
   if (mafiaAlive >= nonMafiaAlive) return 'mafia';
   return null;
+}
+
+/**
+ * Start the Night phase.
+ * @param {Object} opts
+ * @param {Object} opts.channel - Supabase Realtime channel
+ * @param {Object} opts.currentPlayer - { id, name }
+ * @param {boolean} opts.isHost
+ * @param {HTMLElement} opts.app
+ */
+function startNightPhase({ channel, currentPlayer, isHost, app }) {
+  if (isHost) {
+    gameState.phase = 'night';
+    resetNightActions();
+    setupNightListeners(channel, gameState.players);
+    channel.send({
+      type: 'broadcast',
+      event: 'phase:night',
+      payload: { players: gameState.players },
+    });
+  }
+
+  // Determine this player's role and partners
+  const playerState = gameState.players.find(p => p.id === currentPlayer.id);
+  const currentRole = playerState?.role || { id: 'guest', name: 'Guest', emoji: '', color: '' };
+  const mafiaPartners = currentRole.id === 'mafia'
+    ? gameState.players.filter(p => p.role.id === 'mafia' && p.id !== currentPlayer.id && p.alive)
+        .map(p => ({ id: p.id, name: p.name }))
+    : [];
+
+  showNight({
+    app,
+    channel,
+    players: gameState.players,
+    currentPlayer,
+    currentRole,
+    isHost,
+    mafiaPartners,
+    onNightEnd: ({ eliminatedName, players: updatedPlayers }) => {
+      // Non-host: sync game state from host broadcast
+      if (!isHost && updatedPlayers) {
+        gameState.players = updatedPlayers;
+      }
+      // Check win conditions BEFORE transitioning to Day
+      const winner = checkWinCondition();
+      if (winner) {
+        if (isHost) {
+          channel.send({
+            type: 'broadcast',
+            event: 'game:over',
+            payload: { winner, players: gameState.players },
+          });
+        }
+        console.log(`Game over! ${winner} win.`);
+        return;
+      }
+      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: eliminatedName });
+    },
+  });
 }
 
 /**
@@ -84,18 +144,24 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
     currentPlayer,
     isHost,
     onVoteResult: (result) => {
-      if (result.eliminatedPlayer && isHost) {
+      if (result.eliminatedPlayer) {
         const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
         if (target) target.alive = false;
       }
 
       const winner = checkWinCondition();
       if (winner) {
-        // Game over (game-over screen not yet implemented)
+        if (isHost) {
+          channel.send({
+            type: 'broadcast',
+            event: 'game:over',
+            payload: { winner, players: gameState.players },
+          });
+        }
         console.log(`Game over! ${winner} win.`);
-      } else {
-        // Transition to next Night (not yet implemented)
-        console.log('Day phase complete. Transitioning to Night phase...');
+      } else if (isHost) {
+        // Host drives next Night; non-host will receive phase:night broadcast
+        startNightPhase({ channel, currentPlayer, isHost, app });
       }
     },
   });
@@ -141,29 +207,23 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
     updateReadyStatus(readySet.size, totalPlayers);
 
     if (readySet.size >= totalPlayers) {
-      // All players ready — transition to Day (Night not yet implemented)
-      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
+      // All players ready — transition to Night phase
+      startNightPhase({ channel, currentPlayer, isHost, app });
     }
   });
 
-  // Non-host: listen for Day phase broadcast from host
+  // Non-host: listen for Night phase broadcast from host
   if (!isHost) {
-    channel.on('broadcast', { event: 'phase:day-discuss' }, (msg) => {
+    channel.on('broadcast', { event: 'phase:night' }, (msg) => {
       // Update local game state from host broadcast
       if (msg.payload.players) {
         gameState = {
-          phase: 'day-discuss',
+          phase: 'night',
           players: msg.payload.players,
           roles: {},
         };
       }
-      startDayPhase({
-        channel,
-        currentPlayer,
-        isHost,
-        app,
-        nightEliminatedName: msg.payload.eliminatedName,
-      });
+      startNightPhase({ channel, currentPlayer, isHost, app });
     });
   }
 
