@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { setSupabase, showCreateScreen, showJoinScreen } from './room.js';
+import { createMuteButton } from './audio.js';
 
 // --- Supabase singleton ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -30,6 +31,9 @@ function showTitle() {
     showJoinScreen(app, showTitle);
   });
 }
+
+// --- Mute toggle (persistent in corner) ---
+document.body.appendChild(createMuteButton());
 
 // --- Boot ---
 showTitle();
