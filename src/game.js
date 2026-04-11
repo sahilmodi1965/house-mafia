@@ -2,6 +2,7 @@ import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
+import { playSound, haptic } from './audio.js';
 
 /**
  * Game loop orchestration.
@@ -92,6 +93,8 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
       const winner = checkWinCondition();
       if (winner) {
         // Game over (game-over screen not yet implemented)
+        playSound('win');
+        haptic('gameover');
         console.log(`Game over! ${winner} win.`);
       } else {
         // Transition to next Night (not yet implemented)

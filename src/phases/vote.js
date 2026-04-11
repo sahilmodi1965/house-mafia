@@ -1,5 +1,7 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
+import { playSound, haptic } from '../audio.js';
+import { transitionTo } from '../ui/screens.js';
 
 /**
  * Voting phase.
@@ -100,22 +102,27 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
   }
 
   function showResult(eliminatedPlayer) {
-    if (eliminatedPlayer) {
-      app.innerHTML = `
-        <div id="screen-day-result" class="screen active">
-          <h1>Eliminated</h1>
-          <p class="vote-result-name">${eliminatedPlayer.name}</p>
-          <p class="vote-result-role">Role: <span style="color: ${eliminatedPlayer.role.color}">${eliminatedPlayer.role.emoji} ${eliminatedPlayer.role.name}</span></p>
-        </div>
-      `;
-    } else {
-      app.innerHTML = `
-        <div id="screen-day-result" class="screen active">
-          <h1>No Elimination</h1>
-          <p class="vote-result-name">The vote was tied or no majority was reached.</p>
-        </div>
-      `;
-    }
+    playSound('eliminate');
+    haptic('eliminate');
+
+    transitionTo(app, () => {
+      if (eliminatedPlayer) {
+        app.innerHTML = `
+          <div id="screen-day-result" class="screen active screen--eliminate-in">
+            <h1>Eliminated</h1>
+            <p class="vote-result-name">${eliminatedPlayer.name}</p>
+            <p class="vote-result-role">Role: <span style="color: ${eliminatedPlayer.role.color}">${eliminatedPlayer.role.emoji} ${eliminatedPlayer.role.name}</span></p>
+          </div>
+        `;
+      } else {
+        app.innerHTML = `
+          <div id="screen-day-result" class="screen active">
+            <h1>No Elimination</h1>
+            <p class="vote-result-name">The vote was tied or no majority was reached.</p>
+          </div>
+        `;
+      }
+    }, eliminatedPlayer ? 'screen--eliminate-in' : undefined);
   }
 
   // Host handles vote tallying and timer
@@ -223,6 +230,10 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
 
       hasVoted = true;
       const targetId = btn.dataset.playerId;
+
+      // Sound + haptic on vote cast
+      playSound('vote');
+      haptic('vote');
 
       // Highlight selected
       btn.classList.add('vote-btn--selected');

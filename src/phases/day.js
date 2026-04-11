@@ -1,5 +1,7 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
+import { playSound, haptic } from '../audio.js';
+import { transitionTo } from '../ui/screens.js';
 
 /**
  * Day discussion phase.
@@ -34,24 +36,28 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
     ? `<p class="day-announcement">During the night, <strong>${eliminatedName}</strong> was eliminated.</p>`
     : `<p class="day-announcement">No one was eliminated during the night.</p>`;
 
-  app.innerHTML = `
-    <div id="screen-day-discuss" class="screen active">
-      <h1>Day -- Discuss!</h1>
-      ${announcementHTML}
-      <div id="day-timer-container"></div>
-      <ul class="day-player-list">${playerListHTML}</ul>
-      <div class="day-chat" id="day-chat">
-        <div class="day-chat__messages" id="day-chat-messages"></div>
-        ${isAlive ? `
-        <div class="day-chat__input-row">
-          <input type="text" class="input day-chat__input" id="day-chat-input" placeholder="Type a message..." maxlength="120" autocomplete="off" />
-          <button class="btn btn--cyan day-chat__send" id="day-chat-send">Send</button>
+  transitionTo(app, () => {
+    app.innerHTML = `
+      <div id="screen-day-discuss" class="screen active screen--day-wash">
+        <h1>Day -- Discuss!</h1>
+        ${announcementHTML}
+        <div id="day-timer-container"></div>
+        <ul class="day-player-list">${playerListHTML}</ul>
+        <div class="day-chat" id="day-chat">
+          <div class="day-chat__messages" id="day-chat-messages"></div>
+          ${isAlive ? `
+          <div class="day-chat__input-row">
+            <input type="text" class="input day-chat__input" id="day-chat-input" placeholder="Type a message..." maxlength="120" autocomplete="off" />
+            <button class="btn btn--cyan day-chat__send" id="day-chat-send">Send</button>
+          </div>
+          ` : '<p class="day-chat__spectator">You are eliminated. Spectating.</p>'}
         </div>
-        ` : '<p class="day-chat__spectator">You are eliminated. Spectating.</p>'}
       </div>
-    </div>
-  `;
+    `;
+    afterRender();
+  }, 'screen--day-wash');
 
+  function afterRender() {
   // Timer
   const timerContainer = document.getElementById('day-timer-container');
   const timer = createTimer(GAME.DISCUSSION_DURATION, null, () => {
@@ -125,4 +131,5 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
       if (e.key === 'Enter') sendMessage();
     });
   }
+  } // end afterRender
 }

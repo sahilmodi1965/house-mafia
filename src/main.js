@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { setSupabase, showCreateScreen, showJoinScreen } from './room.js';
+import { createMuteButton, preloadAll } from './audio.js';
 
 // --- Supabase singleton ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -30,6 +31,12 @@ function showTitle() {
     showJoinScreen(app, showTitle);
   });
 }
+
+// --- Mute button (persistent, top-right corner) ---
+document.body.appendChild(createMuteButton());
+
+// --- Preload audio on first user interaction ---
+document.addEventListener('click', () => preloadAll(), { once: true });
 
 // --- Boot ---
 showTitle();
