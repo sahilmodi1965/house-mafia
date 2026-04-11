@@ -388,3 +388,120 @@ h1 {
   font-size: 1.125rem;
   margin-bottom: 1rem;
 }
+
+/* --- Game over screen --- */
+
+.gameover-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 1rem;
+}
+
+.gameover__title {
+  font-size: 2.5rem;
+  font-weight: 900;
+  margin-bottom: 0.5rem;
+  -webkit-text-fill-color: initial;
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+}
+
+.gameover__title--mafia {
+  color: var(--neon-pink);
+}
+
+.gameover__title--guests {
+  color: var(--neon-cyan);
+}
+
+.gameover__outcome {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 1rem;
+}
+
+.gameover-spectator {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--neon-pink);
+  background-color: var(--surface);
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+
+.gameover__stats {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.gameover__stat {
+  font-size: 0.875rem;
+  color: var(--neon-yellow);
+  font-weight: 700;
+}
+
+.gameover__reveal-heading {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 0.75rem;
+  -webkit-text-fill-color: initial;
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+}
+
+.gameover__role-list {
+  list-style: none;
+  width: 100%;
+  margin-bottom: 1.5rem;
+}
+
+.gameover-player {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 0.25rem;
+  background-color: var(--surface);
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  text-align: left;
+}
+
+.gameover-player--dead {
+  opacity: 0.4;
+}
+
+.gameover-player--dead .gameover-player__name {
+  text-decoration: line-through;
+}
+
+.gameover-player__name {
+  flex: 1;
+  font-weight: 700;
+}
+
+.gameover-player__role {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.gameover-player__status {
+  font-size: 0.75rem;
+  color: var(--neon-pink);
+}
+
+.gameover-you {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text);
+  opacity: 0.7;
+}

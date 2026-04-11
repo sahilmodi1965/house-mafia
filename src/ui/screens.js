@@ -3,7 +3,16 @@ import { ROLES } from '../roles.js';
 /**
  * Role reveal screen — shows each player their assigned role
  * with a card flip animation. Handles "Ready" acknowledgement.
+ *
+ * Game over screen — shows winner, full role reveal, and play-again.
  */
+
+/** Role color map by role id */
+const ROLE_COLORS = {
+  mafia: 'var(--neon-pink)',
+  host: 'var(--neon-cyan)',
+  guest: 'var(--neon-yellow)',
+};
 
 /**
  * Show the role reveal screen for the current player.
@@ -83,4 +92,67 @@ export function updateReadyStatus(readyCount, totalCount) {
   if (el) {
     el.textContent = `${readyCount}/${totalCount} ready`;
   }
+}
+
+/**
+ * Show the game over screen.
+ * Full-screen overlay with winner announcement, full role reveal,
+ * stats, and a Play Again button.
+ *
+ * @param {Object} opts
+ * @param {HTMLElement} opts.app - Root app element
+ * @param {string} opts.winner - 'mafia' | 'guests'
+ * @param {Array} opts.players - Array of { id, name, role, alive }
+ * @param {Object} opts.currentPlayer - { id, name }
+ * @param {number} opts.rounds - Number of rounds played
+ * @param {number} opts.eliminations - Number of eliminations
+ * @param {Function} opts.onPlayAgain - Called when Play Again is tapped
+ */
+export function showGameOver({ app, winner, players, currentPlayer, rounds, eliminations, onPlayAgain }) {
+  const isMafiaWin = winner === 'mafia';
+  const winnerText = isMafiaWin ? 'Mafia Wins!' : 'Guests Win!';
+  const winnerColorClass = isMafiaWin ? 'gameover__title--mafia' : 'gameover__title--guests';
+
+  // Determine if current player was on the winning team
+  const me = players.find(p => p.id === currentPlayer.id);
+  const myRole = me ? me.role.id : 'guest';
+  const iWon = (winner === 'mafia' && myRole === 'mafia') ||
+               (winner === 'guests' && myRole !== 'mafia');
+  const outcomeText = iWon ? 'You won!' : 'You lost.';
+
+  // Build role reveal list — all players, color-coded by role, dead = dimmed + strikethrough
+  const roleListHTML = players.map(p => {
+    const color = ROLE_COLORS[p.role.id] || 'var(--text)';
+    const deadClass = !p.alive ? 'gameover-player--dead' : '';
+    const youBadge = p.id === currentPlayer.id ? ' <span class="gameover-you">(you)</span>' : '';
+    return `<li class="gameover-player ${deadClass}">
+      <span class="gameover-player__name" style="color: ${color}">${p.role.emoji} ${p.name}${youBadge}</span>
+      <span class="gameover-player__role" style="color: ${color}">${p.role.name}</span>
+      ${!p.alive ? '<span class="gameover-player__status">eliminated</span>' : ''}
+    </li>`;
+  }).join('');
+
+  // Spectator banner for eliminated players
+  const spectatorBanner = (me && !me.alive)
+    ? '<p class="gameover-spectator">You were eliminated</p>'
+    : '';
+
+  app.innerHTML = `
+    <div id="screen-game-over" class="screen active gameover-overlay">
+      <h1 class="gameover__title ${winnerColorClass}">${winnerText}</h1>
+      ${spectatorBanner}
+      <p class="gameover__outcome">${outcomeText}</p>
+      <div class="gameover__stats">
+        <span class="gameover__stat">Rounds: ${rounds}</span>
+        <span class="gameover__stat">Eliminations: ${eliminations}</span>
+      </div>
+      <h2 class="gameover__reveal-heading">All Roles</h2>
+      <ul class="gameover__role-list">${roleListHTML}</ul>
+      <button class="btn btn--pink" id="btn-play-again">Play Again</button>
+    </div>
+  `;
+
+  document.getElementById('btn-play-again').addEventListener('click', () => {
+    if (onPlayAgain) onPlayAgain();
+  });
 }

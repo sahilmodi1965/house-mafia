@@ -1,7 +1,8 @@
 import { assignRoles } from './roles.js';
-import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
+import { showRoleReveal, updateReadyStatus, showGameOver } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
+import { returnToLobby } from './room.js';
 
 /**
  * Game loop orchestration.
@@ -11,6 +12,12 @@ import { showVoting } from './phases/vote.js';
 
 /** Game state — authoritative on the host's client */
 let gameState = null;
+
+/** Round counter for stats */
+let roundCount = 0;
+
+/** Elimination counter for stats */
+let eliminationCount = 0;
 
 /**
  * Check win conditions after an elimination.
@@ -25,6 +32,51 @@ function checkWinCondition() {
   if (mafiaAlive === 0) return 'guests';
   if (mafiaAlive >= nonMafiaAlive) return 'mafia';
   return null;
+}
+
+/**
+ * Handle game over — broadcast, show screen, wire play-again.
+ * @param {string} winner - 'mafia' | 'guests'
+ * @param {Object} opts
+ * @param {Object} opts.channel
+ * @param {Object} opts.currentPlayer
+ * @param {boolean} opts.isHost
+ * @param {HTMLElement} opts.app
+ */
+function handleGameOver(winner, { channel, currentPlayer, isHost, app }) {
+  if (isHost) {
+    gameState.phase = 'game-over';
+    channel.send({
+      type: 'broadcast',
+      event: 'game:over',
+      payload: {
+        winner,
+        players: gameState.players,
+        rounds: roundCount,
+        eliminations: eliminationCount,
+      },
+    });
+  }
+
+  showGameOver({
+    app,
+    winner,
+    players: gameState.players,
+    currentPlayer,
+    rounds: roundCount,
+    eliminations: eliminationCount,
+    onPlayAgain: () => {
+      if (isHost) {
+        channel.send({
+          type: 'broadcast',
+          event: 'game:play-again',
+          payload: {},
+        });
+      }
+      // Return to lobby, reuse existing channel and room code
+      returnToLobby(app);
+    },
+  });
 }
 
 /**
@@ -86,16 +138,19 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
     onVoteResult: (result) => {
       if (result.eliminatedPlayer && isHost) {
         const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
-        if (target) target.alive = false;
+        if (target) {
+          target.alive = false;
+          eliminationCount++;
+        }
       }
 
       const winner = checkWinCondition();
       if (winner) {
-        // Game over (game-over screen not yet implemented)
-        console.log(`Game over! ${winner} win.`);
+        handleGameOver(winner, { channel, currentPlayer, isHost, app });
       } else {
-        // Transition to next Night (not yet implemented)
-        console.log('Day phase complete. Transitioning to Night phase...');
+        // Transition to next Night
+        roundCount++;
+        startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
       }
     },
   });
@@ -116,6 +171,32 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
 export function startGame({ channel, players, currentPlayer, isHost, app }) {
   const readySet = new Set();
   const totalPlayers = players.length;
+
+  // Reset stats for new game
+  roundCount = 1;
+  eliminationCount = 0;
+
+  // Listen for game:over broadcast (non-host)
+  channel.on('broadcast', { event: 'game:over' }, (msg) => {
+    if (!isHost) {
+      const { winner, players: allPlayers, rounds, eliminations } = msg.payload;
+      gameState = {
+        phase: 'game-over',
+        players: allPlayers,
+        roles: {},
+      };
+      roundCount = rounds;
+      eliminationCount = eliminations;
+      handleGameOver(winner, { channel, currentPlayer, isHost, app });
+    }
+  });
+
+  // Listen for play-again broadcast (non-host)
+  channel.on('broadcast', { event: 'game:play-again' }, () => {
+    if (!isHost) {
+      returnToLobby(app);
+    }
+  });
 
   // Listen for role assignment targeted to this player
   channel.on('broadcast', { event: 'role:assign' }, (msg) => {

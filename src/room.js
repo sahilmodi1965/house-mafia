@@ -297,6 +297,39 @@ function renderLobby() {
   }
 }
 
+// --- Play Again: return to lobby with same room code and channel ---
+
+/**
+ * Return to the lobby screen after a game, reusing the existing
+ * Supabase channel and room code. Roles are re-randomized when
+ * the game host starts again.
+ * @param {HTMLElement} app - Root app element
+ */
+export function returnToLobby(app) {
+  appEl = app;
+
+  // Re-sync players from current presence state
+  if (channel) {
+    const state = channel.presenceState();
+    syncPlayers(state);
+  }
+
+  showLobby(app, () => {
+    cleanup();
+    // Import dynamically to avoid circular dependency at top level
+    const titleApp = document.getElementById('app');
+    if (titleApp) {
+      titleApp.innerHTML = `
+        <div id="screen-title" class="screen active">
+          <h1>House Mafia</h1>
+          <button class="btn btn--pink" id="btn-create">Create Room</button>
+          <button class="btn btn--cyan" id="btn-join">Join Room</button>
+        </div>
+      `;
+    }
+  });
+}
+
 // --- Cleanup ---
 
 function cleanup() {

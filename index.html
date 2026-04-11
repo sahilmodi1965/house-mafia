@@ -57,6 +57,18 @@
     </div>
   </template>
 
+  <!-- Game over screen template -->
+  <template id="tmpl-game-over">
+    <div id="screen-game-over" class="screen gameover-overlay">
+      <h1 class="gameover__title"></h1>
+      <p class="gameover__outcome"></p>
+      <div class="gameover__stats"></div>
+      <h2 class="gameover__reveal-heading">All Roles</h2>
+      <ul class="gameover__role-list"></ul>
+      <button class="btn btn--pink" id="btn-play-again">Play Again</button>
+    </div>
+  </template>
+
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
