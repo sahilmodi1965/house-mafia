@@ -1,4 +1,5 @@
 import { GAME } from '../config.js';
+import { playSound } from '../audio.js';
 
 /**
  * Reusable countdown timer component.
@@ -24,6 +25,7 @@ export function createTimer(seconds, onTick, onEnd) {
     el.textContent = String(remaining);
     if (remaining <= 10) {
       el.classList.add('timer--warning');
+      playSound('tick');
     } else {
       el.classList.remove('timer--warning');
     }

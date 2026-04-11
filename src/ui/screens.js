@@ -1,4 +1,38 @@
 import { ROLES } from '../roles.js';
+import { playSound, haptic } from '../audio.js';
+
+/**
+ * Screen transition helper — fade out current content, then call a render
+ * callback. Total transition time stays under 200ms (100ms out + 100ms in).
+ * Uses CSS animations, not JS animation frames.
+ *
+ * @param {HTMLElement} app - Root app element
+ * @param {Function} renderFn - Callback that sets app.innerHTML with new screen
+ * @param {string} [extraClass] - Optional CSS class to add to the new screen
+ *                                  (e.g. 'screen--night-wash', 'screen--eliminate-in')
+ */
+export function transitionTo(app, renderFn, extraClass) {
+  const current = app.querySelector('.screen.active');
+  if (current) {
+    current.classList.add('screen--fade-out');
+    current.addEventListener('animationend', () => {
+      renderFn();
+      applyExtraClass(app, extraClass);
+    }, { once: true });
+  } else {
+    renderFn();
+    applyExtraClass(app, extraClass);
+  }
+}
+
+function applyExtraClass(app, extraClass) {
+  if (extraClass) {
+    const newScreen = app.querySelector('.screen.active');
+    if (newScreen) {
+      newScreen.classList.add(extraClass);
+    }
+  }
+}
 
 /**
  * Role reveal screen — shows each player their assigned role
@@ -30,46 +64,50 @@ export function showRoleReveal(app, roleData, playerName, onReady) {
       'You are a guest at the party. Survive and vote wisely to eliminate the Mafia.';
   }
 
-  app.innerHTML = `
-    <div id="screen-role-reveal" class="screen active">
-      <h1>Your Role</h1>
-      <div class="role-card" id="role-card" style="--role-color: ${role.color}">
-        <div class="role-card__inner" id="role-card-inner">
-          <div class="role-card__front">
-            <span class="role-card__question">?</span>
-          </div>
-          <div class="role-card__back">
-            <span class="role-card__emoji">${role.emoji}</span>
-            <span class="role-card__name">${role.name}</span>
+  transitionTo(app, () => {
+    app.innerHTML = `
+      <div id="screen-role-reveal" class="screen active">
+        <h1>Your Role</h1>
+        <div class="role-card" id="role-card" style="--role-color: ${role.color}">
+          <div class="role-card__inner" id="role-card-inner">
+            <div class="role-card__front">
+              <span class="role-card__question">?</span>
+            </div>
+            <div class="role-card__back">
+              <span class="role-card__emoji">${role.emoji}</span>
+              <span class="role-card__name">${role.name}</span>
+            </div>
           </div>
         </div>
+        <p class="role-description" id="role-description" style="opacity: 0;">${description}</p>
+        <button class="btn btn--pink" id="btn-ready" style="opacity: 0;" disabled>Ready</button>
+        <p class="ready-status" id="ready-status"></p>
       </div>
-      <p class="role-description" id="role-description" style="opacity: 0;">${description}</p>
-      <button class="btn btn--pink" id="btn-ready" style="opacity: 0;" disabled>Ready</button>
-      <p class="ready-status" id="ready-status"></p>
-    </div>
-  `;
+    `;
 
-  // Trigger card flip after a brief delay so the player sees the card back first
-  const cardInner = document.getElementById('role-card-inner');
-  const descEl = document.getElementById('role-description');
-  const readyBtn = document.getElementById('btn-ready');
+    // Trigger card flip after a brief delay so the player sees the card back first
+    const cardInner = document.getElementById('role-card-inner');
+    const descEl = document.getElementById('role-description');
+    const readyBtn = document.getElementById('btn-ready');
 
-  setTimeout(() => {
-    cardInner.classList.add('flipped');
-
-    // After flip animation, show description and Ready button
     setTimeout(() => {
-      descEl.style.opacity = '1';
-      readyBtn.style.opacity = '1';
-      readyBtn.disabled = false;
-    }, 200);
-  }, 400);
+      cardInner.classList.add('flipped');
+      playSound('reveal');
+      haptic('reveal');
 
-  readyBtn.addEventListener('click', () => {
-    readyBtn.disabled = true;
-    readyBtn.textContent = 'Waiting for others...';
-    if (onReady) onReady();
+      // After flip animation, show description and Ready button
+      setTimeout(() => {
+        descEl.style.opacity = '1';
+        readyBtn.style.opacity = '1';
+        readyBtn.disabled = false;
+      }, 200);
+    }, 400);
+
+    readyBtn.addEventListener('click', () => {
+      readyBtn.disabled = true;
+      readyBtn.textContent = 'Waiting for others...';
+      if (onReady) onReady();
+    });
   });
 }
 
