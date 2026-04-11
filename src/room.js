@@ -1,5 +1,5 @@
 import { GAME } from './config.js';
-import { startGame } from './game.js';
+import { startGame, resetGameState } from './game.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -190,7 +190,11 @@ async function subscribeToRoom(app, onBack) {
           currentPlayer,
           isHost,
           app: appEl,
+          onPlayAgain: () => handlePlayAgain(),
         });
+      })
+      .on('broadcast', { event: 'game:play-again' }, () => {
+        handlePlayAgain();
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
@@ -289,11 +293,62 @@ function renderLobby() {
           currentPlayer,
           isHost,
           app: appEl,
+          onPlayAgain: () => handlePlayAgain(),
         });
       });
     }
   } else {
     actionsEl.innerHTML = `<p class="waiting-text">Waiting for host to start...</p>`;
+  }
+}
+
+// --- Play Again ---
+
+/**
+ * Return to lobby with the same room code and channel.
+ * Resets game state but keeps the Supabase channel alive.
+ * Roles will be re-randomized on next game start.
+ * The game host stays the same. Players who left are removed
+ * automatically via presence sync.
+ */
+function handlePlayAgain() {
+  resetGameState();
+
+  // Broadcast play-again to other clients (host triggers this)
+  if (isHost && channel) {
+    channel.send({
+      type: 'broadcast',
+      event: 'game:play-again',
+      payload: {},
+    });
+  }
+
+  // Re-sync players from presence (removes anyone who left)
+  if (channel) {
+    const state = channel.presenceState();
+    syncPlayers(state);
+  }
+
+  // Re-render lobby without destroying the channel
+  if (appEl) {
+    appEl.innerHTML = `
+      <div id="screen-lobby" class="screen active">
+        <h1>Lobby</h1>
+        <p class="room-code-display">Room Code: <span id="lobby-code">${roomCode}</span></p>
+        <p class="player-count" id="lobby-count">${players.length}/${GAME.MAX_PLAYERS}</p>
+        <ul class="player-list" id="lobby-players"></ul>
+        <div id="lobby-actions"></div>
+        <button class="btn btn--cyan" id="btn-leave-lobby">Leave</button>
+      </div>
+    `;
+
+    document.getElementById('btn-leave-lobby').addEventListener('click', () => {
+      cleanup();
+      // Navigate to title screen — import not available, so reload
+      window.location.reload();
+    });
+
+    renderLobby();
   }
 }
 
