@@ -1,5 +1,5 @@
 import { GAME } from './config.js';
-import { startGame } from './game.js';
+import { startGame, getGameState } from './game.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -13,6 +13,8 @@ let players = [];
 let isHost = false;
 let roomCode = null;
 let appEl = null;
+let gcIntervalId = null;
+let lastNonSoloTimestamp = Date.now();
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -46,6 +48,59 @@ function syncPlayers(state) {
     }
   }
   renderLobby();
+}
+
+// --- Host-side room garbage collector ---
+
+/**
+ * Start the host-side GC interval.
+ * Fires every ROOM_GC_CHECK_INTERVAL_MS (30 s).
+ * If the host has been the only player present for >=
+ * ROOM_GC_ABANDON_THRESHOLD_MS (2 min), unsubscribes the channel and
+ * returns to the title screen so the room slot becomes available.
+ * The GC is skipped entirely when the game has already started
+ * (gameState.phase !== null/undefined and !== 'lobby').
+ *
+ * @param {Function} onBack - Title-screen navigation callback
+ */
+function startGarbageCollector(onBack) {
+  lastNonSoloTimestamp = Date.now();
+
+  gcIntervalId = setInterval(() => {
+    // Skip GC once the game has started — only reap abandoned lobby rooms
+    const gs = getGameState();
+    if (gs !== null) return;
+
+    const presenceCount = Object.keys(channel ? channel.presenceState() : {}).length;
+
+    if (presenceCount > 1) {
+      // Other players are still present — reset the solo timer
+      lastNonSoloTimestamp = Date.now();
+      return;
+    }
+
+    // Host is the only one (or channel is gone) — check the threshold
+    if (Date.now() - lastNonSoloTimestamp >= GAME.ROOM_GC_ABANDON_THRESHOLD_MS) {
+      // Show a brief abandoned message before tearing down
+      if (appEl) {
+        const notice = document.createElement('p');
+        notice.className = 'gc-abandoned-notice';
+        notice.textContent = 'Room abandoned — returning to home screen.';
+        const screen = appEl.querySelector('.screen');
+        if (screen) screen.appendChild(notice);
+      }
+
+      // Give the message a moment to render, then clean up
+      setTimeout(() => {
+        cleanup();
+        onBack();
+      }, 1500);
+
+      // Stop the interval immediately so it doesn't fire again
+      clearInterval(gcIntervalId);
+      gcIntervalId = null;
+    }
+  }, GAME.ROOM_GC_CHECK_INTERVAL_MS);
 }
 
 // --- Create Room ---
@@ -221,6 +276,10 @@ async function subscribeToRoom(app, onBack) {
 
           await channel.track(currentPlayer);
           showLobby(app, onBack);
+          // Only the host runs the garbage collector — joiners do not
+          if (isHost) {
+            startGarbageCollector(onBack);
+          }
           resolve();
         } else if (status === 'CHANNEL_ERROR') {
           reject(new Error('Channel error'));
@@ -300,6 +359,10 @@ function renderLobby() {
 // --- Cleanup ---
 
 function cleanup() {
+  if (gcIntervalId !== null) {
+    clearInterval(gcIntervalId);
+    gcIntervalId = null;
+  }
   if (channel) {
     channel.unsubscribe();
     channel = null;
@@ -309,4 +372,5 @@ function cleanup() {
   isHost = false;
   roomCode = null;
   appEl = null;
+  lastNonSoloTimestamp = Date.now();
 }
