@@ -89,7 +89,18 @@ async function findAvailableRoomCode(client) {
 }
 
 function generatePlayerId() {
-  return crypto.randomUUID();
+  const isDev = new URLSearchParams(window.location.search).get('dev') === '1';
+  const storage = isDev ? sessionStorage : localStorage;
+  const KEY = 'houseMafiaClientId';
+  let id = storage.getItem(KEY);
+  if (!id) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const bytes = new Uint8Array(25);
+    crypto.getRandomValues(bytes);
+    id = Array.from(bytes, (b) => chars[b % chars.length]).join('');
+    storage.setItem(KEY, id);
+  }
+  return id;
 }
 
 // --- Presence handling ---
