@@ -26,10 +26,9 @@ export function setSupabase(client) {
 // --- Helpers ---
 
 function generateRoomCode(length = GAME.ROOM_CODE_LENGTH) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   let code = '';
   for (let i = 0; i < length; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+    code += GAME.ROOM_CODE_CHARS.charAt(Math.floor(Math.random() * GAME.ROOM_CODE_CHARS.length));
   }
   return code;
 }
