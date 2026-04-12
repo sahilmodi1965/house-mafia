@@ -155,7 +155,9 @@ export function showJoinScreen(app, onBack) {
         onBack();
       });
     } catch (err) {
-      errorEl.textContent = 'Failed to join room. Try again.';
+      if (!errorEl.textContent) {
+        errorEl.textContent = 'Failed to join room. Try again.';
+      }
     }
   });
 }
