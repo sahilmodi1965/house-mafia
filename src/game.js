@@ -2,6 +2,7 @@ import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
+import { DEV_MODE, scheduleStubAction } from './dev.js';
 
 /**
  * Game loop orchestration.
@@ -170,6 +171,7 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
   if (isHost) {
     // Host runs role assignment
     const assignments = assignRoles(players);
+    const stubPlayers = DEV_MODE ? players.filter(p => p.isStub) : [];
 
     // Initialize game state on host
     gameState = {
@@ -179,13 +181,15 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
         name: p.name,
         role: assignments[p.id].role,
         alive: true,
+        isStub: !!p.isStub,
       })),
       roles: assignments,
     };
 
-    // Broadcast each player's role via targeted messages
+    // Broadcast each real player's role via targeted messages
     // CRITICAL: each player only receives their own role
     for (const player of players) {
+      if (player.isStub) continue; // stubs have no real client to receive
       const roleData = assignments[player.id];
       channel.send({
         type: 'broadcast',
@@ -195,6 +199,23 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
           roleData,
         },
       });
+    }
+
+    // Auto-schedule stub ready-acks — stubs immediately "acknowledge" their roles
+    if (DEV_MODE && stubPlayers.length > 0) {
+      for (const stub of stubPlayers) {
+        scheduleStubAction('ready', {
+          stubId: stub.id,
+          delayMs: 800 + Math.random() * 700,
+          onResolve: ({ stubId }) => {
+            readySet.add(stubId);
+            updateReadyStatus(readySet.size, totalPlayers);
+            if (readySet.size >= totalPlayers) {
+              startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
+            }
+          },
+        });
+      }
     }
   }
 }

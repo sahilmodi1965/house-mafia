@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { setSupabase, showCreateScreen, showJoinScreen } from './room.js';
+import { DEV_MODE } from './dev.js';
 
 // --- Supabase singleton ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -13,6 +14,14 @@ if (supabaseUrl && supabaseAnonKey) {
 
 // --- App root ---
 const app = document.getElementById('app');
+
+// --- Dev mode banner ---
+if (DEV_MODE) {
+  const banner = document.createElement('div');
+  banner.id = 'dev-banner';
+  banner.textContent = 'DEV MODE (?dev=1)';
+  document.body.insertBefore(banner, document.body.firstChild);
+}
 
 // --- Title screen ---
 function showTitle() {

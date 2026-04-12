@@ -1,5 +1,6 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
+import { DEV_MODE, createStubPlayer } from './dev.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -37,6 +38,8 @@ function generatePlayerId() {
 // --- Presence handling ---
 
 function syncPlayers(state) {
+  // Preserve local stub players across Supabase presence syncs
+  const stubs = players.filter(p => p.isStub);
   players = [];
   for (const key of Object.keys(state)) {
     const presences = state[key];
@@ -44,6 +47,10 @@ function syncPlayers(state) {
       // Use the most recent presence for each key
       players.push(presences[presences.length - 1]);
     }
+  }
+  // Re-append stubs (they are local-only, not in Supabase presence)
+  for (const stub of stubs) {
+    players.push(stub);
   }
   renderLobby();
 }
@@ -232,6 +239,10 @@ async function subscribeToRoom(app, onBack) {
 // --- Lobby screen ---
 
 function showLobby(app, onBack) {
+  const devStubRow = DEV_MODE && isHost
+    ? `<button class="btn btn--yellow" id="btn-add-stub">Add Stub Player</button>`
+    : '';
+
   app.innerHTML = `
     <div id="screen-lobby" class="screen active">
       <h1>Lobby</h1>
@@ -239,6 +250,7 @@ function showLobby(app, onBack) {
       <p class="player-count" id="lobby-count">${players.length}/${GAME.MAX_PLAYERS}</p>
       <ul class="player-list" id="lobby-players"></ul>
       <div id="lobby-actions"></div>
+      ${devStubRow}
       <button class="btn btn--cyan" id="btn-leave-lobby">Leave</button>
     </div>
   `;
@@ -247,6 +259,15 @@ function showLobby(app, onBack) {
     cleanup();
     onBack();
   });
+
+  if (DEV_MODE && isHost) {
+    document.getElementById('btn-add-stub').addEventListener('click', () => {
+      if (players.length >= GAME.MAX_PLAYERS) return;
+      const stub = createStubPlayer();
+      players.push(stub);
+      renderLobby();
+    });
+  }
 
   renderLobby();
 }
@@ -263,25 +284,30 @@ function renderLobby() {
   listEl.innerHTML = players
     .map(
       (p) =>
-        `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}</li>`
+        `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}</li>`
     )
     .join('');
 
   if (isHost) {
-    const canStart = players.length >= GAME.MIN_PLAYERS;
+    const minRequired = DEV_MODE ? GAME.DEV_MIN_PLAYERS : GAME.MIN_PLAYERS;
+    const canStart = players.length >= minRequired;
     actionsEl.innerHTML = `
       <button class="btn btn--pink" id="btn-start-game" ${canStart ? '' : 'disabled'}>
-        Start Game${canStart ? '' : ` (need ${GAME.MIN_PLAYERS}+)`}
+        Start Game${canStart ? '' : ` (need ${minRequired}+)`}
       </button>
     `;
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
       startBtn.addEventListener('click', () => {
-        channel.send({
-          type: 'broadcast',
-          event: 'game:start',
-          payload: {},
-        });
+        // Real (non-stub) players receive the broadcast
+        const realPlayers = players.filter(p => !p.isStub);
+        if (realPlayers.length > 1) {
+          channel.send({
+            type: 'broadcast',
+            event: 'game:start',
+            payload: {},
+          });
+        }
         // Broadcast doesn't echo back to sender, so trigger locally
         startGame({
           channel,
