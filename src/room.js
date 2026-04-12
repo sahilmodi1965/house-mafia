@@ -93,7 +93,9 @@ export function showCreateScreen(app, onBack) {
     try {
       await subscribeToRoom(app, onBack);
     } catch (err) {
-      errorEl.textContent = 'Failed to create room. Try again.';
+      errorEl.textContent = err.message === 'Connection failed — check your internet'
+        ? err.message
+        : 'Failed to create room. Try again.';
     }
   });
 }
@@ -155,78 +157,113 @@ export function showJoinScreen(app, onBack) {
         onBack();
       });
     } catch (err) {
-      errorEl.textContent = 'Failed to join room. Try again.';
+      if (err.message === 'Connection failed — check your internet') {
+        errorEl.textContent = err.message;
+      } else if (errorEl.textContent === '') {
+        // subscribeToRoom sets join-error directly for Room not found / Room full;
+        // only fall back to the generic message if nothing was set
+        errorEl.textContent = 'Failed to join room. Try again.';
+      }
     }
   });
 }
 
 // --- Channel subscription ---
 
+const MAX_SUBSCRIBE_ATTEMPTS = 3;
+const SUBSCRIBE_RETRY_DELAY_MS = 500;
+
 async function subscribeToRoom(app, onBack) {
   appEl = app;
-  channel = supabase.channel(`room:${roomCode}`, {
-    config: { presence: { key: currentPlayer.id } },
-  });
 
-  // Wait for subscribe to complete, then check presence for join validation
-  await new Promise((resolve, reject) => {
-    channel
-      .on('presence', { event: 'sync' }, () => {
-        const state = channel.presenceState();
-        // If joining (not host), validate room exists and capacity
-        syncPlayers(state);
-        resolve();
-      })
-      .on('presence', { event: 'join' }, () => {
-        // Handled by sync
-      })
-      .on('presence', { event: 'leave' }, () => {
-        // Handled by sync
-      })
-      .on('broadcast', { event: 'game:start' }, () => {
-        startGame({
-          channel,
-          players: [...players],
-          currentPlayer,
-          isHost,
-          app: appEl,
-        });
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          // For joiners: peek at presence to check room existence and capacity
-          if (!isHost) {
-            const state = channel.presenceState();
-            const currentCount = Object.keys(state).length;
+  for (let attempt = 1; attempt <= MAX_SUBSCRIBE_ATTEMPTS; attempt++) {
+    // Remove any previous channel before creating a fresh one
+    if (channel) {
+      await supabase.removeChannel(channel);
+      channel = null;
+    }
 
-            if (currentCount === 0) {
-              // No one in the room — room doesn't exist
-              channel.unsubscribe();
-              channel = null;
-              const errorEl = document.getElementById('join-error');
-              if (errorEl) errorEl.textContent = 'Room not found. Check the code and try again.';
-              reject(new Error('Room not found'));
-              return;
-            }
+    channel = supabase.channel(`room:${roomCode}`, {
+      config: { presence: { key: currentPlayer.id } },
+    });
 
-            if (currentCount >= GAME.MAX_PLAYERS) {
-              channel.unsubscribe();
-              channel = null;
-              const errorEl = document.getElementById('join-error');
-              if (errorEl) errorEl.textContent = `Room is full (${GAME.MAX_PLAYERS}/${GAME.MAX_PLAYERS} players).`;
-              reject(new Error('Room full'));
-              return;
-            }
-          }
+    let channelError = false;
 
-          await channel.track(currentPlayer);
-          showLobby(app, onBack);
+    // Wait for subscribe to complete, then check presence for join validation
+    await new Promise((resolve, reject) => {
+      channel
+        .on('presence', { event: 'sync' }, () => {
+          const state = channel.presenceState();
+          // If joining (not host), validate room exists and capacity
+          syncPlayers(state);
           resolve();
-        } else if (status === 'CHANNEL_ERROR') {
-          reject(new Error('Channel error'));
-        }
-      });
-  });
+        })
+        .on('presence', { event: 'join' }, () => {
+          // Handled by sync
+        })
+        .on('presence', { event: 'leave' }, () => {
+          // Handled by sync
+        })
+        .on('broadcast', { event: 'game:start' }, () => {
+          startGame({
+            channel,
+            players: [...players],
+            currentPlayer,
+            isHost,
+            app: appEl,
+          });
+        })
+        .subscribe(async (status) => {
+          if (status === 'SUBSCRIBED') {
+            // For joiners: peek at presence to check room existence and capacity
+            if (!isHost) {
+              const state = channel.presenceState();
+              const currentCount = Object.keys(state).length;
+
+              if (currentCount === 0) {
+                // No one in the room — room doesn't exist
+                channel.unsubscribe();
+                channel = null;
+                const errorEl = document.getElementById('join-error');
+                if (errorEl) errorEl.textContent = 'Room not found. Check the code and try again.';
+                reject(new Error('Room not found'));
+                return;
+              }
+
+              if (currentCount >= GAME.MAX_PLAYERS) {
+                channel.unsubscribe();
+                channel = null;
+                const errorEl = document.getElementById('join-error');
+                if (errorEl) errorEl.textContent = `Room is full (${GAME.MAX_PLAYERS}/${GAME.MAX_PLAYERS} players).`;
+                reject(new Error('Room full'));
+                return;
+              }
+            }
+
+            await channel.track(currentPlayer);
+            showLobby(app, onBack);
+            resolve();
+          } else if (status === 'CHANNEL_ERROR') {
+            channelError = true;
+            reject(new Error('Channel error'));
+          }
+        });
+    }).catch((err) => {
+      // Re-throw non-retryable errors immediately
+      if (!channelError) throw err;
+      // For CHANNEL_ERROR, we fall through to the retry logic below
+    });
+
+    // If we reached here without a channel error, we're done successfully
+    if (!channelError) return;
+
+    // CHANNEL_ERROR path: retry if attempts remain, otherwise surface the error
+    if (attempt < MAX_SUBSCRIBE_ATTEMPTS) {
+      await new Promise((res) => setTimeout(res, SUBSCRIBE_RETRY_DELAY_MS));
+    } else {
+      throw new Error('Connection failed — check your internet');
+    }
+  }
 }
 
 // --- Lobby screen ---
