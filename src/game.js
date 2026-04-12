@@ -3,11 +3,13 @@ import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction } from './dev.js';
+import { subscribeToPrivate } from './curator.js';
 
 /**
  * Game loop orchestration.
  * The game host's client runs role assignment and broadcasts
- * each player's role via targeted Supabase messages.
+ * each player's role on that player's PRIVATE channel, so secrets
+ * never traverse the shared room channel. See src/curator.js.
  */
 
 /** Game state — authoritative on the host's client */
@@ -104,37 +106,66 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
 
 /**
  * Start the game. Called when game:start is triggered.
- * The game host runs assignment and broadcasts roles.
- * Non-host clients wait for their targeted role message.
+ * The game host runs role assignment and publishes each role on the
+ * recipient's PRIVATE channel. Non-host clients listen on their own
+ * private channel for their role — the shared channel never carries
+ * secrets.
  *
  * @param {Object} opts
- * @param {Object} opts.channel - Supabase Realtime channel
+ * @param {Object} opts.channel - Shared Supabase Realtime channel (public events only)
+ * @param {Object} opts.privateChannel - This client's own per-player private channel
+ * @param {Object} opts.supabase - Supabase client (host needs it to subscribe to peers' private channels)
+ * @param {string} opts.roomCode - Room code (for computing private channel names)
  * @param {Array}  opts.players - Array of { id, name, isHost }
  * @param {Object} opts.currentPlayer - { id, name, isHost }
  * @param {boolean} opts.isHost - Whether this client is the game host
  * @param {HTMLElement} opts.app - Root app element
  */
-export function startGame({ channel, players, currentPlayer, isHost, app }) {
+export function startGame({
+  channel,
+  privateChannel,
+  supabase,
+  roomCode,
+  players,
+  currentPlayer,
+  isHost,
+  app,
+}) {
   const readySet = new Set();
   const totalPlayers = players.length;
 
-  // Listen for role assignment targeted to this player
-  channel.on('broadcast', { event: 'role:assign' }, (msg) => {
-    const payload = msg.payload;
-    // Only process messages targeted to this player
-    if (payload.targetPlayerId !== currentPlayer.id) return;
-
-    const roleData = payload.roleData;
+  // Handle this player's role assignment. It arrives on their OWN private
+  // channel. The shared `channel` never carries role data.
+  const handleRoleAssign = (payload) => {
+    const roleData = payload && payload.roleData;
+    if (!roleData) return;
 
     showRoleReveal(app, roleData, currentPlayer.name, () => {
-      // Player tapped Ready — broadcast to all
+      // Player tapped Ready — broadcast to everyone on the shared channel.
+      // "Ready" is not a secret.
       channel.send({
         type: 'broadcast',
         event: 'player:ready',
         payload: { playerId: currentPlayer.id },
       });
     });
-  });
+  };
+
+  if (privateChannel) {
+    // Drain any role:assign buffered by curator.subscribeToPrivate before
+    // this listener was attached (avoids host-sends-before-joiner-listens
+    // race).
+    if (privateChannel.__bufferedRoleAssign) {
+      const buffered = privateChannel.__bufferedRoleAssign;
+      privateChannel.__bufferedRoleAssign = null;
+      handleRoleAssign(buffered);
+    }
+    privateChannel.on('broadcast', { event: 'role:assign' }, (msg) => {
+      handleRoleAssign(msg.payload);
+    });
+  } else {
+    console.error('No private channel available — cannot receive role assignment');
+  }
 
   // Listen for ready acknowledgements
   channel.on('broadcast', { event: 'player:ready' }, (msg) => {
@@ -186,22 +217,39 @@ export function startGame({ channel, players, currentPlayer, isHost, app }) {
       roles: assignments,
     };
 
-    // Broadcast each real player's role via targeted messages
-    // CRITICAL: each player only receives their own role
-    for (const player of players) {
-      if (player.isStub) continue; // stubs have no real client to receive
-      const roleData = assignments[player.id];
-      channel.send({
-        type: 'broadcast',
-        event: 'role:assign',
-        payload: {
-          targetPlayerId: player.id,
-          roleData,
-        },
-      });
-    }
+    // Publish each REAL player's role on THAT player's private channel.
+    // Stubs have no client and no private channel — skip them. The host
+    // reuses its own already-subscribed private channel; for peers, the
+    // host opens a send-capable handle to their per-player channel.
+    (async () => {
+      for (const player of players) {
+        if (player.isStub) continue; // stubs have no client to receive
+        const roleData = assignments[player.id];
 
-    // Auto-schedule stub ready-acks — stubs immediately "acknowledge" their roles
+        let sendChannel;
+        if (player.id === currentPlayer.id) {
+          sendChannel = privateChannel;
+        } else {
+          try {
+            sendChannel = await subscribeToPrivate(supabase, roomCode, player.id);
+          } catch (err) {
+            console.error(`Host: failed to open private channel for ${player.id}`, err);
+            continue;
+          }
+        }
+
+        if (!sendChannel) continue;
+
+        await sendChannel.send({
+          type: 'broadcast',
+          event: 'role:assign',
+          payload: { roleData },
+        });
+      }
+    })();
+
+    // Auto-schedule stub ready-acks — stubs "acknowledge" their roles after a delay.
+    // Lives outside the role-publish loop because stubs never receive role:assign.
     if (DEV_MODE && stubPlayers.length > 0) {
       for (const stub of stubPlayers) {
         scheduleStubAction('ready', {

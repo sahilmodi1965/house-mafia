@@ -1,6 +1,7 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
 import { DEV_MODE, createStubPlayer } from './dev.js';
+import { subscribeToPrivate } from './curator.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -9,6 +10,7 @@ import { DEV_MODE, createStubPlayer } from './dev.js';
 
 let supabase = null;
 let channel = null;
+let privateChannel = null; // this player's own per-player private channel
 let currentPlayer = null;
 let players = [];
 let isHost = false;
@@ -197,6 +199,9 @@ async function subscribeToRoom(app, onBack) {
         if (isHost) return; // host already triggered startGame locally
         startGame({
           channel,
+          privateChannel,
+          supabase,
+          roomCode,
           players: [...players],
           currentPlayer,
           isHost,
@@ -231,6 +236,21 @@ async function subscribeToRoom(app, onBack) {
           }
 
           await channel.track(currentPlayer);
+
+          // Subscribe to THIS player's own private channel so secret
+          // payloads (role assignment, Mafia partner reveal, Host
+          // investigation results) can be delivered point-to-point
+          // instead of on the shared room channel. See src/curator.js.
+          try {
+            privateChannel = await subscribeToPrivate(
+              supabase,
+              roomCode,
+              currentPlayer.id
+            );
+          } catch (err) {
+            console.error('Failed to subscribe to private channel', err);
+          }
+
           showLobby(app, onBack);
           resolve();
         } else if (status === 'CHANNEL_ERROR') {
@@ -315,6 +335,9 @@ function renderLobby() {
         // Broadcast doesn't echo back to sender, so trigger locally
         startGame({
           channel,
+          privateChannel,
+          supabase,
+          roomCode,
           players: [...players],
           currentPlayer,
           isHost,
@@ -333,6 +356,10 @@ function cleanup() {
   if (channel) {
     channel.unsubscribe();
     channel = null;
+  }
+  if (privateChannel) {
+    privateChannel.unsubscribe();
+    privateChannel = null;
   }
   currentPlayer = null;
   players = [];
