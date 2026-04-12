@@ -417,3 +417,71 @@ h1 {
   margin-left: 0.5rem;
   opacity: 0.8;
 }
+
+/* --- Game-over screen --- */
+
+.game-over__banner {
+  font-size: 2.25rem;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  padding: 1rem 1.5rem;
+  border-radius: 12px;
+  margin-bottom: 1.5rem;
+  text-transform: uppercase;
+}
+
+.game-over__banner--mafia {
+  background: var(--neon-pink);
+  color: var(--bg);
+}
+
+.game-over__banner--guests {
+  background: var(--neon-cyan);
+  color: var(--bg);
+}
+
+.game-over__roles-heading {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--neon-yellow);
+  margin-bottom: 0.75rem;
+  text-align: center;
+}
+
+.game-over__player-list {
+  list-style: none;
+  margin-bottom: 1.5rem;
+}
+
+.game-over__player-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.625rem 1rem;
+  margin-bottom: 0.375rem;
+  background-color: var(--surface);
+  border-radius: 6px;
+}
+
+.game-over__player-name {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.game-over__dead {
+  color: var(--neon-pink);
+  font-weight: 900;
+  margin-left: 0.375rem;
+}
+
+.game-over__role-badge {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--badge-color, var(--neon-cyan));
+  white-space: nowrap;
+  margin-left: 0.5rem;
+}
+
+.game-over__actions {
+  margin-top: 0.5rem;
+}

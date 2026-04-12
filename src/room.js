@@ -16,6 +16,7 @@ let players = [];
 let isHost = false;
 let roomCode = null;
 let appEl = null;
+let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -173,6 +174,7 @@ export function showJoinScreen(app, onBack) {
 
 async function subscribeToRoom(app, onBack) {
   appEl = app;
+  onBackFn = onBack;
   channel = supabase.channel(`room:${roomCode}`, {
     config: {
       presence: { key: currentPlayer.id },
@@ -206,6 +208,10 @@ async function subscribeToRoom(app, onBack) {
           currentPlayer,
           isHost,
           app: appEl,
+          onReturnToTitle: () => {
+            cleanup();
+            onBack();
+          },
         });
       })
       .subscribe(async (status) => {
@@ -342,6 +348,10 @@ function renderLobby() {
           currentPlayer,
           isHost,
           app: appEl,
+          onReturnToTitle: () => {
+            cleanup();
+            if (onBackFn) onBackFn();
+          },
         });
       });
     }
@@ -366,4 +376,5 @@ function cleanup() {
   isHost = false;
   roomCode = null;
   appEl = null;
+  onBackFn = null;
 }
