@@ -21,13 +21,68 @@ export function setSupabase(client) {
 
 // --- Helpers ---
 
-function generateRoomCode() {
+function generateRoomCode(length = GAME.ROOM_CODE_LENGTH) {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   let code = '';
-  for (let i = 0; i < GAME.ROOM_CODE_LENGTH; i++) {
+  for (let i = 0; i < length; i++) {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return code;
+}
+
+/**
+ * Probe a candidate room code by subscribing without tracking presence.
+ * Returns true if the channel appears empty (code is available), false if taken.
+ * The probe never calls channel.track(), so it leaves no presence state behind.
+ */
+async function isRoomCodeAvailable(client, code) {
+  return new Promise((resolve) => {
+    const probe = client.channel(`room:${code}`, {
+      config: { presence: { key: '__probe__' } },
+    });
+
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        probe.unsubscribe();
+        // Timed out waiting for sync — treat as available (no one responded)
+        resolve(true);
+      }
+    }, 1000);
+
+    probe
+      .on('presence', { event: 'sync' }, () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        const count = Object.keys(probe.presenceState()).length;
+        probe.unsubscribe();
+        resolve(count === 0);
+      })
+      .subscribe();
+  });
+}
+
+/**
+ * Find a collision-free room code by probing Supabase Realtime presence.
+ * Tries up to MAX_ROOM_CODE_ATTEMPTS 4-letter codes, then falls back to 5-letter codes.
+ */
+async function findAvailableRoomCode(client) {
+  for (let attempt = 0; attempt < GAME.MAX_ROOM_CODE_ATTEMPTS; attempt++) {
+    const candidate = generateRoomCode(GAME.ROOM_CODE_LENGTH);
+    if (await isRoomCodeAvailable(client, candidate)) {
+      return candidate;
+    }
+  }
+  // Fallback: try 5-letter codes (26^5 = 11.8M vs 26^4 = 456K space)
+  for (let attempt = 0; attempt < GAME.MAX_ROOM_CODE_ATTEMPTS; attempt++) {
+    const candidate = generateRoomCode(GAME.ROOM_CODE_LENGTH + 1);
+    if (await isRoomCodeAvailable(client, candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error('Could not find an available room code after maximum attempts');
 }
 
 function generatePlayerId() {
@@ -82,7 +137,6 @@ export function showCreateScreen(app, onBack) {
       return;
     }
 
-    roomCode = generateRoomCode();
     isHost = true;
     currentPlayer = {
       id: generatePlayerId(),
@@ -91,6 +145,7 @@ export function showCreateScreen(app, onBack) {
     };
 
     try {
+      roomCode = await findAvailableRoomCode(supabase);
       await subscribeToRoom(app, onBack);
     } catch (err) {
       errorEl.textContent = 'Failed to create room. Try again.';
