@@ -146,6 +146,12 @@ export function showCreateScreen(app, onBack) {
       return;
     }
 
+    const lastCreatedAt = localStorage.getItem('lastRoomCreatedAt');
+    if (lastCreatedAt && Date.now() - parseInt(lastCreatedAt, 10) < GAME.ROOM_CREATE_COOLDOWN_MS) {
+      errorEl.textContent = 'Slow down — wait a moment';
+      return;
+    }
+
     isHost = true;
     currentPlayer = {
       id: generatePlayerId(),
@@ -156,6 +162,7 @@ export function showCreateScreen(app, onBack) {
     try {
       roomCode = await findAvailableRoomCode(supabase);
       await subscribeToRoom(app, onBack);
+      localStorage.setItem('lastRoomCreatedAt', Date.now().toString());
     } catch (err) {
       errorEl.textContent = 'Failed to create room. Try again.';
     }
