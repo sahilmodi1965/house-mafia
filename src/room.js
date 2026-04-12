@@ -1,5 +1,6 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
+import { showSpectator } from './ui/spectator.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -209,6 +210,54 @@ async function subscribeToRoom(app, onBack) {
               return;
             }
 
+            // Detect whether game is already in progress by inspecting host's presence
+            const presenceState = channel.presenceState();
+            let gameInProgress = false;
+            for (const key of Object.keys(presenceState)) {
+              const presences = presenceState[key];
+              if (presences && presences.length > 0) {
+                const record = presences[presences.length - 1];
+                if (record.isHost && record.gameState === 'in-progress') {
+                  gameInProgress = true;
+                  break;
+                }
+              }
+            }
+
+            if (gameInProgress) {
+              // Count current spectators to enforce cap
+              let spectatorCount = 0;
+              for (const key of Object.keys(presenceState)) {
+                const presences = presenceState[key];
+                if (presences && presences.length > 0) {
+                  const record = presences[presences.length - 1];
+                  if (record.isSpectator) spectatorCount++;
+                }
+              }
+
+              if (spectatorCount >= GAME.MAX_SPECTATORS) {
+                channel.unsubscribe();
+                channel = null;
+                const errorEl = document.getElementById('join-error');
+                if (errorEl) errorEl.textContent = 'Room is full (max spectators reached).';
+                reject(new Error('Spectator cap reached'));
+                return;
+              }
+
+              // Track self as spectator
+              await channel.track({ ...currentPlayer, isSpectator: true });
+              showSpectator(app, {
+                roomCode,
+                channel,
+                onLeave: () => {
+                  cleanup();
+                  onBack();
+                },
+              });
+              resolve();
+              return;
+            }
+
             if (currentCount >= GAME.MAX_PLAYERS) {
               channel.unsubscribe();
               channel = null;
@@ -276,7 +325,9 @@ function renderLobby() {
     `;
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
-      startBtn.addEventListener('click', () => {
+      startBtn.addEventListener('click', async () => {
+        // Update host's presence payload so late joiners know the game is in progress
+        await channel.track({ ...currentPlayer, gameState: 'in-progress' });
         channel.send({
           type: 'broadcast',
           event: 'game:start',
