@@ -7,6 +7,7 @@ import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 import { showGameOver } from './ui/game-over.js';
+import { setGamePhaseState, setRebindHandler } from './room.js';
 
 /**
  * Game loop orchestration.
@@ -89,6 +90,12 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
  * @param {Function} opts.onReturnToTitle - Called when the player leaves to title
  */
 function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle }) {
+  // Game is over — disable the reconnect grace window so a leave drops
+  // the player immediately again (lobby semantics).
+  if (isHost) {
+    setGamePhaseState('lobby');
+    setRebindHandler(null);
+  }
   showGameOver(app, {
     winner,
     players,
@@ -633,6 +640,33 @@ export function startGame({
       }
     });
 
+    // Reconnect rebind (issue #33) — the host sends this on our private
+    // channel when we rejoin inside the grace window. The role:assign
+    // frame above has already re-seeded our role; here we just refresh
+    // the local phase snapshot and let the next phase broadcast drive
+    // the UI. Non-host clients are driven by phase broadcasts on the
+    // shared channel, so a rebind can wait for the next one — we don't
+    // need to synthetically re-enter a screen mid-phase. (A fuller
+    // recovery UX is explicitly out of scope; see issue body.)
+    privateChannel.on('broadcast', { event: 'phase:rebind' }, (msg) => {
+      const payload = msg.payload || {};
+      if (gameState) {
+        gameState.phase = payload.phase || gameState.phase;
+        if (Array.isArray(payload.players)) {
+          gameState.players = payload.players;
+        }
+      } else {
+        gameState = {
+          phase: payload.phase || 'role-reveal',
+          players: Array.isArray(payload.players) ? payload.players : [],
+          roles: {},
+        };
+      }
+      if (Array.isArray(payload.players)) {
+        nightPlayerList = payload.players;
+      }
+    });
+
     // The game host also listens on its OWN private channel for
     // incoming mafia:pick / host:investigate requests from peers.
     // Self-echo is already enabled on private channels, so the host's
@@ -742,6 +776,85 @@ export function startGame({
   }
 
   if (isHost) {
+    // Mid-game presence leaves should enter the grace window instead of
+    // dropping the seat immediately (issue #33). room.js flips back to
+    // 'lobby' when the game ends via transitionToGameOver → setGamePhaseState.
+    setGamePhaseState('active');
+
+    // Register the rebind handler. room.js invokes this when either:
+    //  - a graced clientId rejoins the room (seat !== null, reconnected)
+    //  - a grace timer expires without reconnect (seat === null, expired)
+    // On reconnect the host re-delivers the curated state on the player's
+    // private channel: (1) their role assignment, (2) a phase snapshot so
+    // the client lands back on the correct screen.
+    setRebindHandler(async (clientId, seat, flags) => {
+      if (!gameState) return;
+      if (flags && flags.expired) {
+        // Grace window closed without reconnect — remove the seat from
+        // the authoritative game state so win-condition checks account
+        // for them. We do NOT synthesize an elimination broadcast: the
+        // existing game loop already handles dead/absent players via
+        // the alive flag. Flip the seat to not-alive so checkWinCondition
+        // treats it as out.
+        const row = gameState.players.find((p) => p.id === clientId);
+        if (row) {
+          row.alive = false;
+        }
+        return;
+      }
+      // Reconnect — re-open a private-channel write handle to the peer
+      // (its old handle may be stale) and re-deliver role + phase state.
+      let sendChannel = peerPrivateChannels.get(clientId);
+      try {
+        sendChannel = await subscribeToPrivate(supabase, roomCode, clientId);
+        peerPrivateChannels.set(clientId, sendChannel);
+      } catch (err) {
+        console.error('Rebind: failed to open private channel', err);
+        return;
+      }
+
+      // 1) Re-send role:assign for this player so their client knows
+      //    which role they hold. Curator plumbing (see curator.js)
+      //    buffers role:assign frames that arrive before game.js has
+      //    attached its handler, so this is safe whether the client
+      //    has already subscribed or is still mid-boot.
+      const roleData = gameState.roles && gameState.roles[clientId];
+      if (roleData) {
+        try {
+          await sendChannel.send({
+            type: 'broadcast',
+            event: 'role:assign',
+            payload: { roleData },
+          });
+        } catch (err) {
+          console.error('Rebind: failed to re-send role:assign', err);
+        }
+      }
+
+      // 2) Re-deliver a curated phase snapshot. We keep this minimal:
+      //    the current phase name plus the public player list (alive
+      //    flags only — the reconnecting client already has its role
+      //    via the frame above). Non-host listeners below react to
+      //    `phase:rebind` by restoring the correct screen.
+      try {
+        await sendChannel.send({
+          type: 'broadcast',
+          event: 'phase:rebind',
+          payload: {
+            phase: gameState.phase,
+            players: gameState.players.map((p) => ({
+              id: p.id,
+              name: p.name,
+              alive: p.alive,
+              isStub: !!p.isStub,
+            })),
+          },
+        });
+      } catch (err) {
+        console.error('Rebind: failed to send phase:rebind', err);
+      }
+    });
+
     // Host runs role assignment
     const assignments = assignRoles(players);
     const stubPlayers = DEV_MODE ? players.filter(p => p.isStub) : [];

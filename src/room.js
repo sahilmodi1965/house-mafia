@@ -1,6 +1,6 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
-import { DEV_MODE, createStubPlayer } from './dev.js';
+import { DEV_MODE, createStubPlayer, devStorage } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 
 /**
@@ -17,6 +17,21 @@ let isHost = false;
 let roomCode = null;
 let appEl = null;
 let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
+
+// Reconnect / grace-window state (issue #33).
+//
+// Once the game has started (state !== 'lobby'), the host no longer removes
+// a seat the instant its presence:leave fires. Instead the seat is flagged
+// `disconnected: true` and a per-clientId grace timer is started. If the
+// same clientId rejoins the room inside RECONNECT_GRACE_MS, the host
+// restores the seat and re-delivers curated state (role + current phase
+// snapshot) on the player's private channel. After the timer expires the
+// seat is removed from `players` for good and the presence snapshot is
+// allowed to drop it on the next sync.
+let gamePhaseState = 'lobby'; // 'lobby' | 'active'
+const disconnectedSeats = new Map(); // clientId -> { seat, timer, disconnectedAt }
+let onRebindFn = null; // game.js installs this to re-deliver curated state
+let lastPresenceKeys = new Set(); // tracked so we can detect rejoins
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -88,8 +103,83 @@ async function findAvailableRoomCode(client) {
   throw new Error('Could not find an available room code after maximum attempts');
 }
 
+const CLIENT_ID_STORAGE_KEY = 'houseMafiaClientId';
+const CLIENT_ID_LENGTH = 25;
+const CLIENT_ID_CHARS =
+  'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+function createRandomClientId() {
+  let id = '';
+  for (let i = 0; i < CLIENT_ID_LENGTH; i++) {
+    id += CLIENT_ID_CHARS.charAt(
+      Math.floor(Math.random() * CLIENT_ID_CHARS.length)
+    );
+  }
+  return id;
+}
+
+/**
+ * Return a stable client identity that survives page reloads and brief
+ * network drops. Used as the Supabase presence key so the host can tell
+ * "this is the same player rejoining" from "this is a brand-new player".
+ *
+ * Prod: localStorage-persisted.
+ * Dev (?dev=1): sessionStorage-scoped, so multiple tabs can act as
+ * distinct clients without colliding.
+ */
 function generatePlayerId() {
-  return crypto.randomUUID();
+  try {
+    const existing = devStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    if (
+      existing &&
+      typeof existing === 'string' &&
+      existing.length === CLIENT_ID_LENGTH
+    ) {
+      return existing;
+    }
+    const fresh = createRandomClientId();
+    devStorage.setItem(CLIENT_ID_STORAGE_KEY, fresh);
+    return fresh;
+  } catch (_err) {
+    // Storage unavailable (private mode, quota, etc.) — fall back to an
+    // ephemeral id so the current session still works.
+    return createRandomClientId();
+  }
+}
+
+/**
+ * Called by game.js when the host starts (or ends) a game. While in
+ * 'active' state, mid-game presence:leave events don't immediately drop
+ * the seat — they start a grace timer. Lobby state is unchanged: leaves
+ * remove the player instantly.
+ */
+export function setGamePhaseState(state) {
+  gamePhaseState = state === 'active' ? 'active' : 'lobby';
+  if (gamePhaseState === 'lobby') {
+    // Cancel any pending grace timers — fresh lobby, fresh slate.
+    for (const entry of disconnectedSeats.values()) {
+      clearTimeout(entry.timer);
+    }
+    disconnectedSeats.clear();
+  }
+}
+
+/**
+ * Register a callback that game.js uses to re-deliver curated state to
+ * a reconnecting player. Called with (clientId, seat) on rebind so the
+ * host can re-send role:assign and a current-phase snapshot on that
+ * player's private channel.
+ */
+export function setRebindHandler(fn) {
+  onRebindFn = typeof fn === 'function' ? fn : null;
+}
+
+/**
+ * Expose the currently-tracked player list to game.js (host side).
+ * Returned array is a copy — mutation is fine.
+ */
+export function getCurrentRoomPlayers() {
+  return [...players];
 }
 
 // --- Presence handling ---
@@ -97,19 +187,112 @@ function generatePlayerId() {
 function syncPlayers(state) {
   // Preserve local stub players across Supabase presence syncs
   const stubs = players.filter(p => p.isStub);
-  players = [];
-  for (const key of Object.keys(state)) {
+  const nextKeys = new Set(Object.keys(state));
+
+  // Seats that are currently in their grace window — we must keep them
+  // in the player list even though Supabase presence has dropped them.
+  const gracedSeats = [];
+  for (const [cid, entry] of disconnectedSeats.entries()) {
+    if (!nextKeys.has(cid)) {
+      gracedSeats.push({ ...entry.seat, disconnected: true, disconnectedAt: entry.disconnectedAt });
+    }
+  }
+
+  const nextPlayers = [];
+  for (const key of nextKeys) {
     const presences = state[key];
     if (presences && presences.length > 0) {
       // Use the most recent presence for each key
-      players.push(presences[presences.length - 1]);
+      nextPlayers.push(presences[presences.length - 1]);
+    }
+  }
+
+  // During an active game: detect rejoins and drops by comparing
+  // presence keys against the previous sync.
+  if (gamePhaseState === 'active') {
+    // Rejoins: any key now present that has a grace entry → restore seat.
+    for (const key of nextKeys) {
+      if (disconnectedSeats.has(key)) {
+        rebindSeat(key);
+      }
+    }
+    // Drops: any key previously present but now absent → start grace.
+    for (const key of lastPresenceKeys) {
+      if (!nextKeys.has(key) && !disconnectedSeats.has(key)) {
+        // Find the seat we knew about so we can preserve it.
+        const oldSeat = players.find((p) => p.id === key && !p.isStub);
+        if (oldSeat) {
+          startGraceFor(oldSeat);
+        }
+      }
+    }
+  }
+
+  players = nextPlayers;
+  // Re-append graced seats (flagged disconnected) so the UI still shows them.
+  for (const graced of gracedSeats) {
+    if (!players.find((p) => p.id === graced.id)) {
+      players.push(graced);
     }
   }
   // Re-append stubs (they are local-only, not in Supabase presence)
   for (const stub of stubs) {
     players.push(stub);
   }
+
+  lastPresenceKeys = nextKeys;
   renderLobby();
+}
+
+/**
+ * Mark a seat as disconnected and start its per-clientId grace timer.
+ * Only invoked on the game host's client once the game is active.
+ * Stubs are skipped (they live locally and can't disconnect).
+ */
+function startGraceFor(seat) {
+  if (!seat || !seat.id || seat.isStub) return;
+  if (disconnectedSeats.has(seat.id)) return;
+  const disconnectedAt = Date.now();
+  const timer = setTimeout(() => {
+    // Grace expired — drop the seat permanently.
+    const entry = disconnectedSeats.get(seat.id);
+    if (!entry) return;
+    disconnectedSeats.delete(seat.id);
+    players = players.filter((p) => p.id !== seat.id);
+    renderLobby();
+    if (onRebindFn) {
+      // Signal expiry via the same callback (seat=null) so game.js can
+      // react (e.g. auto-eliminate through its existing game loop).
+      try {
+        onRebindFn(seat.id, null, { expired: true });
+      } catch (err) {
+        console.error('Rebind handler expiry error', err);
+      }
+    }
+  }, GAME.RECONNECT_GRACE_MS);
+  disconnectedSeats.set(seat.id, {
+    seat: { ...seat },
+    timer,
+    disconnectedAt,
+  });
+}
+
+/**
+ * Restore a disconnected seat on the host and ask game.js to re-deliver
+ * curated state (role + phase snapshot) on the player's private channel.
+ */
+function rebindSeat(clientId) {
+  const entry = disconnectedSeats.get(clientId);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  disconnectedSeats.delete(clientId);
+  if (onRebindFn) {
+    try {
+      onRebindFn(clientId, entry.seat, { reconnected: true });
+    } catch (err) {
+      console.error('Rebind handler reconnect error', err);
+    }
+  }
 }
 
 // --- Create Room ---
@@ -258,9 +441,17 @@ async function subscribeToRoom(app, onBack) {
       if (joinerSettled) return;
       joinerSettled = true;
 
-      const currentCount = Object.keys(state).length;
+      const keys = Object.keys(state);
+      const currentCount = keys.length;
 
-      if (currentCount === 0) {
+      // Recovery mode: this stable clientId is already present in the
+      // room's presence state (e.g. the host still sees us within the
+      // grace window, or presence hasn't timed us out yet). We skip the
+      // empty/full checks, track ourselves again, and wait for the host
+      // to re-deliver curated state on our private channel (issue #33).
+      const isRecovery = keys.includes(currentPlayer.id);
+
+      if (!isRecovery && currentCount === 0) {
         // No one in the room — room doesn't exist
         channel.unsubscribe();
         channel = null;
@@ -270,7 +461,7 @@ async function subscribeToRoom(app, onBack) {
         return;
       }
 
-      if (currentCount >= GAME.MAX_PLAYERS) {
+      if (!isRecovery && currentCount >= GAME.MAX_PLAYERS) {
         channel.unsubscribe();
         channel = null;
         const errorEl = document.getElementById('join-error');
@@ -462,4 +653,12 @@ function cleanup() {
   roomCode = null;
   appEl = null;
   onBackFn = null;
+  // Reconnect state — fully reset so a fresh Create/Join starts clean.
+  gamePhaseState = 'lobby';
+  for (const entry of disconnectedSeats.values()) {
+    clearTimeout(entry.timer);
+  }
+  disconnectedSeats.clear();
+  onRebindFn = null;
+  lastPresenceKeys = new Set();
 }
