@@ -218,10 +218,142 @@ export function startGame({
   // phase:night-start broadcast.
   let nightPlayerList = players;
 
+  // Cache of peer private-channel write handles, keyed by playerId.
+  // Populated by the host during role-assign (it already subscribes to
+  // every real player's private channel there) and reused during Night
+  // so the host can deliver host:investigate-result point-to-point.
+  // Non-host clients cache one entry: the GAME host's private channel,
+  // used to send their own mafia:pick / host:investigate.
+  const peerPrivateChannels = new Map();
+
+  // Host-owned night tally state. Reset at the start of each Night.
+  // Key: voterId (mafia player). Value: targetId.
+  let mafiaVotes = new Map();
+
+  // Handle to the active Night screen so the host:investigate-result
+  // listener can push the result into the UI asynchronously.
+  let nightHandle = null;
+
+  // Resolve the game host's player id from the known player list.
+  // Joiners need this to open a write-handle to the host's private
+  // channel for sending mafia:pick / host:investigate.
+  function getGameHostId() {
+    const hostRow = (nightPlayerList || players).find((p) => p.isHost);
+    return hostRow ? hostRow.id : null;
+  }
+
+  /**
+   * Resolve a "kill" from the accumulated mafiaVotes map.
+   * Majority wins. On a tie the FIRST mafia's vote (insertion order)
+   * wins, per the issue spec ("tie = first Mafia's pick"). If no
+   * mafia voted, returns null.
+   */
+  function resolveMafiaKill() {
+    if (mafiaVotes.size === 0) return null;
+    const counts = new Map();
+    for (const targetId of mafiaVotes.values()) {
+      if (!targetId) continue;
+      counts.set(targetId, (counts.get(targetId) || 0) + 1);
+    }
+    if (counts.size === 0) return null;
+
+    // Find the highest count
+    let topCount = 0;
+    for (const c of counts.values()) if (c > topCount) topCount = c;
+
+    // Collect all targets at top count
+    const tied = [];
+    for (const [tid, c] of counts.entries()) if (c === topCount) tied.push(tid);
+
+    if (tied.length === 1) return tied[0];
+
+    // Tie: first mafia's pick (insertion order of mafiaVotes) wins,
+    // as long as that pick is one of the tied targets.
+    for (const targetId of mafiaVotes.values()) {
+      if (targetId && tied.includes(targetId)) return targetId;
+    }
+    return tied[0];
+  }
+
+  /**
+   * Host-side: record a mafia vote, de-duping per voter.
+   * Accepts stub injections too (no-op if voter isn't actually mafia
+   * or target isn't alive — light safety net).
+   */
+  function recordMafiaVote(voterId, targetId) {
+    if (!gameState) return;
+    const voter = gameState.players.find((p) => p.id === voterId);
+    if (!voter || !voter.alive) return;
+    if (!voter.role || voter.role.id !== 'mafia') return;
+    const target = gameState.players.find((p) => p.id === targetId);
+    if (!target || !target.alive) return;
+    // Re-insert to preserve "first pick" semantics per voter.
+    // We keep whatever was first for tie-break on PICK order, but the
+    // latest target per voter. Use Map.delete + set to achieve that.
+    const existed = mafiaVotes.has(voterId);
+    if (!existed) {
+      mafiaVotes.set(voterId, targetId);
+    } else {
+      // Update in place without changing insertion order.
+      mafiaVotes.set(voterId, targetId);
+    }
+  }
+
+  /**
+   * Host-side: handle a Host-role investigation request. Looks up the
+   * target's role and returns the result privately to the investigator.
+   */
+  async function handleHostInvestigate(investigatorId, targetId) {
+    if (!gameState) return;
+    const investigator = gameState.players.find((p) => p.id === investigatorId);
+    if (!investigator || investigator.role?.id !== 'host') return;
+    const target = gameState.players.find((p) => p.id === targetId);
+    if (!target) return;
+
+    const result = target.role?.id === 'mafia' ? 'mafia' : 'not-mafia';
+
+    // Stubs have no client to hear the result — just drop it.
+    if (investigator.isStub) return;
+
+    // If the investigator is the game host themself, push directly to
+    // the local night screen (their private channel self-echo would
+    // also work, but we already have the UI handle on this client).
+    if (investigator.id === currentPlayer.id) {
+      if (nightHandle && nightHandle.showInvestigationResult) {
+        nightHandle.showInvestigationResult(result, target.name);
+      }
+      return;
+    }
+
+    // Peer: use cached private-channel write handle, opening one if
+    // it wasn't cached during role-assign (should be rare).
+    let sendChannel = peerPrivateChannels.get(investigatorId);
+    if (!sendChannel) {
+      try {
+        sendChannel = await subscribeToPrivate(supabase, roomCode, investigatorId);
+        peerPrivateChannels.set(investigatorId, sendChannel);
+      } catch (err) {
+        console.error('Host: failed to open investigator private channel', err);
+        return;
+      }
+    }
+    try {
+      await sendChannel.send({
+        type: 'broadcast',
+        event: 'host:investigate-result',
+        payload: { targetId, targetName: target.name, result },
+      });
+    } catch (err) {
+      console.error('Host: failed to send investigation result', err);
+    }
+  }
+
   /**
    * Run the Night phase locally, then advance to Day on completion.
-   * Each client runs its own 30s timer; the host re-synchronizes
-   * everyone with its existing phase:day-discuss broadcast at the end.
+   * Each client runs its own 30s timer. At timer expiry the game host
+   * resolves the kill, applies it to gameState, and broadcasts
+   * phase:night-end on the shared channel so all joiners transition
+   * to Day with the same eliminated-player announcement.
    */
   function startNightPhase({ eliminatedName = null } = {}) {
     // Defensive: with fewer than MIN_PLAYERS there's nothing to night over.
@@ -237,7 +369,39 @@ export function startGame({
       return;
     }
 
-    showNightPhase({
+    // Fresh tally each Night (host only, but cheap on every client).
+    mafiaVotes = new Map();
+
+    const localRoleId = currentRoleData && currentRoleData.role && currentRoleData.role.id;
+    const gameHostId = getGameHostId();
+
+    // Ensure we can send mafia:pick / host:investigate to the game host.
+    // The GAME host sends to itself (its own private channel has
+    // self-echo enabled) via its already-subscribed privateChannel.
+    // Non-host clients need a write-handle to the game host's private
+    // channel — lazily open one now if their role will actually need it.
+    async function ensureHostPrivateWriteHandle() {
+      if (!gameHostId) return null;
+      if (isHost) return privateChannel; // own channel, self-echo on
+      let ch = peerPrivateChannels.get(gameHostId);
+      if (ch) return ch;
+      try {
+        ch = await subscribeToPrivate(supabase, roomCode, gameHostId);
+        peerPrivateChannels.set(gameHostId, ch);
+        return ch;
+      } catch (err) {
+        console.error('Client: failed to open host private channel', err);
+        return null;
+      }
+    }
+
+    // Pre-warm the write handle for mafia/host-role clients so that
+    // the first tap during Night doesn't race the channel subscribe.
+    if (localRoleId === 'mafia' || localRoleId === 'host') {
+      ensureHostPrivateWriteHandle();
+    }
+
+    nightHandle = showNightPhase({
       app,
       channel,
       players: nightPlayerList,
@@ -245,19 +409,115 @@ export function startGame({
       currentRole: currentRoleData ? currentRoleData.role : null,
       mafiaPartners: currentRoleData ? currentRoleData.mafiaPartners || [] : [],
       isHost,
-      onNightEnd: ({ eliminatedPlayer }) => {
-        // #26 scaffold: eliminatedPlayer is always null. #27 will fill
-        // it in once the broadcast/tally mechanics land.
-        startDayPhase({
-          channel,
-          currentPlayer,
-          isHost,
-          app,
-          nightEliminatedName: eliminatedPlayer ? eliminatedPlayer.name : null,
-          onReturnToTitle,
-        });
+      onTargetSelected: async (target) => {
+        // Route the Mafia pick to the game host on the host's private
+        // channel. Sending on the shared channel would leak the fact
+        // that this player is Mafia to everyone listening.
+        const ch = await ensureHostPrivateWriteHandle();
+        if (!ch) return;
+        try {
+          await ch.send({
+            type: 'broadcast',
+            event: 'mafia:pick',
+            payload: { voterId: currentPlayer.id, targetId: target.id },
+          });
+        } catch (err) {
+          console.error('Failed to send mafia:pick', err);
+        }
+      },
+      onInvestigateSelected: async (target) => {
+        const ch = await ensureHostPrivateWriteHandle();
+        if (!ch) return;
+        try {
+          await ch.send({
+            type: 'broadcast',
+            event: 'host:investigate',
+            payload: { investigatorId: currentPlayer.id, targetId: target.id },
+          });
+        } catch (err) {
+          console.error('Failed to send host:investigate', err);
+        }
+      },
+      onNightEnd: () => {
+        if (isHost) {
+          // Host tallies, applies the kill, and broadcasts the result.
+          const killedId = resolveMafiaKill();
+          let eliminatedPlayer = null;
+          if (killedId) {
+            const target = gameState.players.find((p) => p.id === killedId);
+            if (target && target.alive) {
+              target.alive = false;
+              eliminatedPlayer = {
+                id: target.id,
+                name: target.name,
+              };
+            }
+          }
+          gameState.phase = 'night-end';
+          channel.send({
+            type: 'broadcast',
+            event: 'phase:night-end',
+            payload: {
+              eliminatedPlayerId: eliminatedPlayer ? eliminatedPlayer.id : null,
+              eliminatedPlayerName: eliminatedPlayer ? eliminatedPlayer.name : null,
+              players: gameState.players.map((p) => ({
+                id: p.id,
+                name: p.name,
+                alive: p.alive,
+                isStub: !!p.isStub,
+              })),
+            },
+          });
+          nightHandle = null;
+          startDayPhase({
+            channel,
+            currentPlayer,
+            isHost,
+            app,
+            nightEliminatedName: eliminatedPlayer ? eliminatedPlayer.name : null,
+            onReturnToTitle,
+          });
+        }
+        // Non-host clients wait for phase:night-end from the host
+        // before transitioning — handled below.
       },
     });
+
+    // Auto-fire stub Mafia / stub Host actions on the host's own
+    // client. Stubs have no real client so their picks are injected
+    // directly into mafiaVotes (for Mafia stubs) or run through the
+    // local investigate handler (for Host stubs) without touching the
+    // broadcast channel at all.
+    if (isHost && DEV_MODE && gameState) {
+      const alive = gameState.players.filter((p) => p.alive);
+      for (const stub of gameState.players.filter((p) => p.isStub && p.alive)) {
+        const stubRoleId = stub.role && stub.role.id;
+        if (stubRoleId === 'mafia') {
+          // Valid targets: alive, not self, not a mafia partner.
+          const targets = alive.filter(
+            (p) => p.id !== stub.id && p.role?.id !== 'mafia'
+          );
+          scheduleStubAction('mafia-pick', {
+            stubId: stub.id,
+            targets,
+            delayMs: 1500 + Math.random() * 3000,
+            onResolve: ({ stubId, targetId }) => {
+              if (targetId) recordMafiaVote(stubId, targetId);
+            },
+          });
+        } else if (stubRoleId === 'host') {
+          const targets = alive.filter((p) => p.id !== stub.id);
+          scheduleStubAction('host-investigate', {
+            stubId: stub.id,
+            targets,
+            delayMs: 1500 + Math.random() * 3000,
+            onResolve: ({ stubId, targetId }) => {
+              if (targetId) handleHostInvestigate(stubId, targetId);
+            },
+          });
+        }
+      }
+    }
   }
 
   // Handle this player's role assignment. It arrives on their OWN private
@@ -290,6 +550,33 @@ export function startGame({
     privateChannel.on('broadcast', { event: 'role:assign' }, (msg) => {
       handleRoleAssign(msg.payload);
     });
+
+    // Host-role players receive investigation results on their own
+    // private channel. The game host sends one frame per request.
+    privateChannel.on('broadcast', { event: 'host:investigate-result' }, (msg) => {
+      const { result, targetName } = msg.payload || {};
+      if (nightHandle && nightHandle.showInvestigationResult) {
+        nightHandle.showInvestigationResult(result, targetName);
+      }
+    });
+
+    // The game host also listens on its OWN private channel for
+    // incoming mafia:pick / host:investigate requests from peers.
+    // Self-echo is already enabled on private channels, so the host's
+    // own picks land here too (stubs bypass the channel and inject
+    // directly into mafiaVotes / handleHostInvestigate).
+    if (isHost) {
+      privateChannel.on('broadcast', { event: 'mafia:pick' }, (msg) => {
+        const { voterId, targetId } = msg.payload || {};
+        if (voterId && targetId) recordMafiaVote(voterId, targetId);
+      });
+      privateChannel.on('broadcast', { event: 'host:investigate' }, (msg) => {
+        const { investigatorId, targetId } = msg.payload || {};
+        if (investigatorId && targetId) {
+          handleHostInvestigate(investigatorId, targetId);
+        }
+      });
+    }
   } else {
     console.error('No private channel available — cannot receive role assignment');
   }
@@ -327,6 +614,20 @@ export function startGame({
         nightPlayerList = msg.payload.players;
       }
       startNightPhase();
+    });
+
+    // Non-host: listen for the Night tally result from host. The host
+    // has applied the kill and broadcasts the updated player list.
+    // This broadcast is informational — the actual transition to Day
+    // is driven by the host's subsequent phase:day-discuss broadcast
+    // (which already carries the updated players). We just refresh
+    // our local copy so any UI between frames stays consistent.
+    channel.on('broadcast', { event: 'phase:night-end' }, (msg) => {
+      const payload = msg.payload || {};
+      if (Array.isArray(payload.players)) {
+        nightPlayerList = payload.players;
+      }
+      nightHandle = null;
     });
   }
 
@@ -405,6 +706,8 @@ export function startGame({
         } else {
           try {
             sendChannel = await subscribeToPrivate(supabase, roomCode, player.id);
+            // Cache for reuse during Night (host:investigate-result).
+            peerPrivateChannels.set(player.id, sendChannel);
           } catch (err) {
             console.error(`Host: failed to open private channel for ${player.id}`, err);
             continue;
