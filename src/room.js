@@ -349,8 +349,9 @@ function renderLobby() {
           isHost,
           app: appEl,
           onReturnToTitle: () => {
+            const back = onBackFn;
             cleanup();
-            if (onBackFn) onBackFn();
+            if (back) back();
           },
         });
       });
