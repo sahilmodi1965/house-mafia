@@ -55,26 +55,78 @@ export function shuffle(arr) {
 }
 
 /**
- * Build the role slot list for a given player count.
+ * Build the role slot list for a given player count, using a named preset
+ * from GAME.ROLE_PRESETS. The preset is an array indexed by player count
+ * whose entries are objects mapping role id → count (see src/config.js).
  *
- * Mirrors the original src/roles.js logic verbatim to preserve behavior:
- *   - 1 Mafia per GAME.MAFIA_PER_N players (minimum 1)
- *   - exactly 1 Host
- *   - remainder are Guests
+ * Enforces these invariants at runtime (throws on violation):
+ *   - the preset has a row for `playerCount`
+ *   - Mafia >= 1
+ *   - Guests > Mafia
+ *   - sum(row) === playerCount
+ *   - every role id in the row corresponds to a registered descriptor
+ *   - every role that actually appears in the row meets its descriptor's
+ *     `minPlayers` gate for the requested playerCount
  *
  * Returns an unshuffled array of role descriptors with length === playerCount.
  *
  * @param {number} playerCount
+ * @param {string} [preset='classic']
  * @returns {Array<object>} role descriptors, one per player slot
  */
-export function distributeRoles(playerCount) {
-  const mafiaCount = Math.max(1, Math.floor(playerCount / GAME.MAFIA_PER_N));
-  const hostCount = 1;
-  const guestCount = playerCount - mafiaCount - hostCount;
+export function distributeRoles(playerCount, preset = 'classic') {
+  const presets = GAME.ROLE_PRESETS || {};
+  const table = presets[preset];
+  if (!Array.isArray(table)) {
+    throw new Error(`distributeRoles: unknown preset "${preset}"`);
+  }
+  const row = table[playerCount];
+  if (!row) {
+    throw new Error(
+      `distributeRoles: no role row for playerCount=${playerCount} in preset "${preset}"`
+    );
+  }
 
   const slots = [];
-  for (let i = 0; i < mafiaCount; i++) slots.push(rolesById.mafia);
-  for (let i = 0; i < hostCount; i++) slots.push(rolesById.host);
-  for (let i = 0; i < guestCount; i++) slots.push(rolesById.guest);
+  let mafiaSeen = 0;
+  let guestSeen = 0;
+  const isDevOnlyRow = row.devOnly === true;
+
+  for (const [roleId, count] of Object.entries(row)) {
+    if (roleId === 'devOnly') continue;
+    if (count === 0) continue;
+    const descriptor = rolesById[roleId];
+    if (!descriptor) {
+      throw new Error(
+        `distributeRoles: preset "${preset}" row N=${playerCount} references unknown role id "${roleId}"`
+      );
+    }
+    // Gate: specials cannot appear in a row below their minPlayers.
+    if (descriptor.minPlayers && playerCount < descriptor.minPlayers) {
+      throw new Error(
+        `distributeRoles: preset "${preset}" row N=${playerCount} includes "${roleId}" which requires minPlayers=${descriptor.minPlayers}`
+      );
+    }
+    for (let i = 0; i < count; i++) slots.push(descriptor);
+    if (roleId === 'mafia') mafiaSeen += count;
+    if (roleId === 'guest') guestSeen += count;
+  }
+
+  if (mafiaSeen < 1) {
+    throw new Error(
+      `distributeRoles: preset "${preset}" row N=${playerCount} has no Mafia`
+    );
+  }
+  if (!isDevOnlyRow && guestSeen <= mafiaSeen) {
+    throw new Error(
+      `distributeRoles: preset "${preset}" row N=${playerCount} violates Guests > Mafia (${guestSeen} <= ${mafiaSeen})`
+    );
+  }
+  if (slots.length !== playerCount) {
+    throw new Error(
+      `distributeRoles: preset "${preset}" row N=${playerCount} sums to ${slots.length}, expected ${playerCount}`
+    );
+  }
+
   return slots;
 }

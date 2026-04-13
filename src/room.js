@@ -617,10 +617,18 @@ function renderLobby() {
 
   if (isHost) {
     const minRequired = DEV_MODE ? GAME.DEV_MIN_PLAYERS : GAME.MIN_PLAYERS;
-    const canStart = players.length >= minRequired;
+    const maxAllowed = GAME.MAX_PLAYERS;
+    const canStart =
+      players.length >= minRequired && players.length <= maxAllowed;
+    const disabledLabel =
+      players.length < minRequired
+        ? ` (need ${minRequired}+)`
+        : players.length > maxAllowed
+        ? ` (max ${maxAllowed})`
+        : '';
     actionsEl.innerHTML = `
       <button class="btn btn--pink" id="btn-start-game" ${canStart ? '' : 'disabled'}>
-        Start Game${canStart ? '' : ` (need ${minRequired}+)`}
+        Start Game${canStart ? '' : disabledLabel}
       </button>
     `;
     const startBtn = document.getElementById('btn-start-game');
