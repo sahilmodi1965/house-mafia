@@ -4,6 +4,7 @@ import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
+import { showGameOver } from './ui/game-over.js';
 
 /**
  * Game loop orchestration.
@@ -38,8 +39,9 @@ function checkWinCondition() {
  * @param {boolean} opts.isHost
  * @param {HTMLElement} opts.app
  * @param {string|null} opts.nightEliminatedName - Name eliminated during night
+ * @param {Function} opts.onReturnToTitle - Called to navigate back to title screen
  */
-function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName }) {
+function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName, onReturnToTitle }) {
   if (isHost) {
     gameState.phase = 'day-discuss';
     channel.send({
@@ -60,14 +62,66 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
     isHost,
     eliminatedName: nightEliminatedName,
     onDiscussionEnd: () => {
-      startVotePhase({ channel, currentPlayer, isHost, app });
+      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
     },
   });
 
   // Non-host listens for vote transition
   if (!isHost) {
     channel.on('broadcast', { event: 'phase:day-vote' }, () => {
-      startVotePhase({ channel, currentPlayer, isHost, app });
+      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+    });
+  }
+}
+
+/**
+ * Transition every client to the game-over screen.
+ * Called on both host and non-host clients.
+ *
+ * @param {Object} opts
+ * @param {string} opts.winner - 'mafia' | 'guests'
+ * @param {Array}  opts.players - Full player list with roles
+ * @param {Object} opts.channel
+ * @param {Object} opts.currentPlayer
+ * @param {boolean} opts.isHost
+ * @param {HTMLElement} opts.app
+ * @param {Function} opts.onReturnToTitle - Called when the player leaves to title
+ */
+function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle }) {
+  showGameOver(app, {
+    winner,
+    players,
+    isHost,
+    onPlayAgain: () => {
+      // Host broadcasts return-to-lobby; resets state locally
+      if (isHost) {
+        channel.send({
+          type: 'broadcast',
+          event: 'game:return-lobby',
+          payload: {},
+        });
+      }
+      // Reset game state so a fresh game can start
+      gameState = null;
+      // Return to lobby by navigating to the title screen.
+      // Players will need to re-create / re-join a room.
+      // Limitation: full lobby reset over Supabase channel is not yet
+      // implemented, so the simplest safe path is returning everyone
+      // to the title screen (which already handles channel teardown via
+      // the Leave flow in room.js).
+      if (onReturnToTitle) onReturnToTitle();
+    },
+    onLeave: () => {
+      gameState = null;
+      if (onReturnToTitle) onReturnToTitle();
+    },
+  });
+
+  // Non-host: also listen for host's Play Again broadcast
+  if (!isHost) {
+    channel.on('broadcast', { event: 'game:return-lobby' }, () => {
+      gameState = null;
+      if (onReturnToTitle) onReturnToTitle();
     });
   }
 }
@@ -75,7 +129,7 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
 /**
  * Start the voting sub-phase of Day.
  */
-function startVotePhase({ channel, currentPlayer, isHost, app }) {
+function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }) {
   if (isHost) {
     gameState.phase = 'day-vote';
   }
@@ -94,8 +148,27 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
 
       const winner = checkWinCondition();
       if (winner) {
-        // Game over (game-over screen not yet implemented)
-        console.log(`Game over! ${winner} win.`);
+        if (isHost) {
+          // Broadcast end-game with full player+role list so all clients
+          // can render the same reveal.
+          channel.send({
+            type: 'broadcast',
+            event: 'game:end',
+            payload: {
+              winner,
+              players: gameState.players,
+            },
+          });
+        }
+        transitionToGameOver({
+          winner,
+          players: gameState.players,
+          channel,
+          currentPlayer,
+          isHost,
+          app,
+          onReturnToTitle,
+        });
       } else {
         // Transition to next Night (not yet implemented)
         console.log('Day phase complete. Transitioning to Night phase...');
@@ -120,6 +193,7 @@ function startVotePhase({ channel, currentPlayer, isHost, app }) {
  * @param {Object} opts.currentPlayer - { id, name, isHost }
  * @param {boolean} opts.isHost - Whether this client is the game host
  * @param {HTMLElement} opts.app - Root app element
+ * @param {Function} [opts.onReturnToTitle] - Called to navigate back to the title screen
  */
 export function startGame({
   channel,
@@ -130,6 +204,7 @@ export function startGame({
   currentPlayer,
   isHost,
   app,
+  onReturnToTitle,
 }) {
   const readySet = new Set();
   const totalPlayers = players.length;
@@ -174,7 +249,7 @@ export function startGame({
 
     if (readySet.size >= totalPlayers) {
       // All players ready — transition to Day (Night not yet implemented)
-      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
+      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null, onReturnToTitle });
     }
   });
 
@@ -195,6 +270,27 @@ export function startGame({
         isHost,
         app,
         nightEliminatedName: msg.payload.eliminatedName,
+        onReturnToTitle,
+      });
+    });
+
+    // Non-host: listen for host's end-game broadcast
+    channel.on('broadcast', { event: 'game:end' }, (msg) => {
+      const { winner, players: endPlayers } = msg.payload;
+      // Update local state with the authoritative player list from host
+      if (gameState) {
+        gameState.players = endPlayers;
+      } else {
+        gameState = { phase: 'game-over', players: endPlayers, roles: {} };
+      }
+      transitionToGameOver({
+        winner,
+        players: endPlayers,
+        channel,
+        currentPlayer,
+        isHost,
+        app,
+        onReturnToTitle,
       });
     });
   }
