@@ -4,7 +4,7 @@ import { createTimer } from '../ui/timer.js';
 /**
  * Day discussion phase.
  * Shows alive players, night elimination announcement, 40-second countdown,
- * and text chat via Supabase broadcast.
+ * and tap-to-suspect mechanic via Supabase broadcast.
  * Auto-transitions to voting when timer hits 0.
  */
 
@@ -22,12 +22,14 @@ import { createTimer } from '../ui/timer.js';
 export function showDayDiscussion({ app, channel, players, currentPlayer, isHost, eliminatedName, onDiscussionEnd }) {
   const isAlive = players.find(p => p.id === currentPlayer.id)?.alive !== false;
 
-  // Build player list HTML
-  const playerListHTML = players.map(p => {
-    const classes = ['day-player-item'];
-    if (!p.alive) classes.push('day-player-item--dead');
-    return `<li class="${classes.join(' ')}">${p.name}${!p.alive ? ' <span class="day-player-status">eliminated</span>' : ''}</li>`;
-  }).join('');
+  // Suspect tally — reset fresh each round
+  // suspectTally: Map<targetId, Set<voterId>>
+  // voterNames: Map<voterId, voterName>
+  const suspectTally = new Map();
+  const voterNames = new Map();
+
+  // Track current player's active suspect (at most one at a time)
+  let myCurrentSuspect = null; // targetId or null
 
   // Night elimination announcement
   const announcementHTML = eliminatedName
@@ -39,16 +41,8 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
       <h1>Day -- Discuss!</h1>
       ${announcementHTML}
       <div id="day-timer-container"></div>
-      <ul class="day-player-list">${playerListHTML}</ul>
-      <div class="day-chat" id="day-chat">
-        <div class="day-chat__messages" id="day-chat-messages"></div>
-        ${isAlive ? `
-        <div class="day-chat__input-row">
-          <input type="text" class="input day-chat__input" id="day-chat-input" placeholder="Type a message..." maxlength="120" autocomplete="off" />
-          <button class="btn btn--cyan day-chat__send" id="day-chat-send">Send</button>
-        </div>
-        ` : '<p class="day-chat__spectator">You are eliminated. Spectating.</p>'}
-      </div>
+      <ul class="day-player-list" id="day-player-list"></ul>
+      ${!isAlive ? '<p class="day-chat__spectator">You are eliminated. Spectating.</p>' : ''}
     </div>
   `;
 
@@ -88,41 +82,131 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
     });
   }
 
-  // Chat
-  const messagesEl = document.getElementById('day-chat-messages');
-  const chatInput = document.getElementById('day-chat-input');
-  const chatSend = document.getElementById('day-chat-send');
+  // --- Suspect tally helpers ---
 
-  function addChatMessage(name, text) {
-    const msgEl = document.createElement('div');
-    msgEl.className = 'day-chat__msg';
-    msgEl.innerHTML = `<strong>${name}:</strong> ${text}`;
-    messagesEl.appendChild(msgEl);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+  function renderPlayerList() {
+    const listEl = document.getElementById('day-player-list');
+    if (!listEl) return;
+
+    listEl.innerHTML = players.map(p => {
+      const isAlivePlayer = p.alive !== false;
+      const isDead = !isAlivePlayer;
+
+      // Determine if this row is tappable:
+      // - local player must be alive
+      // - target must be a different alive player (not self, not dead)
+      const tappable = isAlive && isAlivePlayer && p.id !== currentPlayer.id;
+
+      // Build suspect list for this player
+      const suspectors = suspectTally.get(p.id) || new Set();
+      const suspectorNames = [...suspectors].map(vid => voterNames.get(vid) || '?');
+      const iSuspectThis = myCurrentSuspect === p.id;
+
+      const classes = ['day-player-item'];
+      if (isDead) classes.push('day-player-item--dead');
+      if (tappable) classes.push('day-player-item--clickable');
+      if (suspectors.size > 0) classes.push('day-player-item--has-suspects');
+      if (iSuspectThis) classes.push('day-player-item--my-suspect');
+
+      const deadLabel = isDead ? ' <span class="day-player-status">eliminated</span>' : '';
+
+      let suspectHTML = '';
+      if (suspectors.size > 0) {
+        suspectHTML = `<span class="suspect-list">← ${suspectorNames.join(', ')}</span>`;
+      }
+
+      return `<li class="${classes.join(' ')}" data-player-id="${p.id}">
+        <span class="day-player-name">${p.name}${deadLabel}</span>
+        ${suspectHTML}
+      </li>`;
+    }).join('');
   }
 
-  // Listen for chat messages
-  channel.on('broadcast', { event: 'chat:message' }, (msg) => {
-    addChatMessage(msg.payload.name, msg.payload.text);
+  // Initial render
+  renderPlayerList();
+
+  // --- Suspect broadcast logic ---
+
+  function broadcastSuspect(targetId) {
+    channel.send({
+      type: 'broadcast',
+      event: 'day:suspect',
+      payload: {
+        voterId: currentPlayer.id,
+        voterName: currentPlayer.name,
+        targetId,
+      },
+    });
+  }
+
+  function broadcastUnsuspect(targetId) {
+    channel.send({
+      type: 'broadcast',
+      event: 'day:unsuspect',
+      payload: {
+        voterId: currentPlayer.id,
+        targetId,
+      },
+    });
+  }
+
+  function applyLocalSuspect(voterId, voterName, targetId) {
+    voterNames.set(voterId, voterName);
+    if (!suspectTally.has(targetId)) {
+      suspectTally.set(targetId, new Set());
+    }
+    suspectTally.get(targetId).add(voterId);
+    renderPlayerList();
+  }
+
+  function applyLocalUnsuspect(voterId, targetId) {
+    const s = suspectTally.get(targetId);
+    if (s) {
+      s.delete(voterId);
+      if (s.size === 0) suspectTally.delete(targetId);
+    }
+    renderPlayerList();
+  }
+
+  // Listen for suspect/unsuspect from all players
+  channel.on('broadcast', { event: 'day:suspect' }, (msg) => {
+    const { voterId, voterName, targetId } = msg.payload;
+    applyLocalSuspect(voterId, voterName, targetId);
   });
 
-  if (chatSend && chatInput) {
-    function sendMessage() {
-      const text = chatInput.value.trim();
-      if (!text) return;
-      channel.send({
-        type: 'broadcast',
-        event: 'chat:message',
-        payload: { name: currentPlayer.name, text },
-      });
-      // Broadcast doesn't echo to sender
-      addChatMessage(currentPlayer.name, text);
-      chatInput.value = '';
-    }
+  channel.on('broadcast', { event: 'day:unsuspect' }, (msg) => {
+    const { voterId, targetId } = msg.payload;
+    applyLocalUnsuspect(voterId, targetId);
+  });
 
-    chatSend.addEventListener('click', sendMessage);
-    chatInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendMessage();
+  // --- Click handler for tap-to-suspect (alive players only) ---
+
+  if (isAlive) {
+    const listEl = document.getElementById('day-player-list');
+    listEl.addEventListener('click', (e) => {
+      const li = e.target.closest('.day-player-item--clickable');
+      if (!li) return;
+
+      const targetId = li.dataset.playerId;
+      const targetPlayer = players.find(p => p.id === targetId);
+      if (!targetPlayer || !targetPlayer.alive) return;
+
+      if (myCurrentSuspect === targetId) {
+        // Tapping existing suspect → retract
+        myCurrentSuspect = null;
+        broadcastUnsuspect(targetId);
+        applyLocalUnsuspect(currentPlayer.id, targetId);
+      } else {
+        // Auto-retract previous suspect before moving to new one
+        if (myCurrentSuspect !== null) {
+          const prev = myCurrentSuspect;
+          broadcastUnsuspect(prev);
+          applyLocalUnsuspect(currentPlayer.id, prev);
+        }
+        myCurrentSuspect = targetId;
+        broadcastSuspect(targetId);
+        applyLocalSuspect(currentPlayer.id, currentPlayer.name, targetId);
+      }
     });
   }
 }

@@ -337,6 +337,10 @@ h1 {
   border-radius: 6px;
   font-size: 0.9375rem;
   text-align: left;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
 }
 
 .day-player-item--dead {
@@ -350,48 +354,53 @@ h1 {
   margin-left: 0.5rem;
 }
 
-/* --- Day chat --- */
-
-.day-chat {
-  margin-top: 0.5rem;
-}
-
-.day-chat__messages {
-  background-color: var(--surface);
-  border-radius: 8px;
-  padding: 0.5rem;
-  height: 120px;
-  overflow-y: auto;
-  margin-bottom: 0.5rem;
-  text-align: left;
-}
-
-.day-chat__msg {
-  font-size: 0.875rem;
-  margin-bottom: 0.25rem;
-  line-height: 1.3;
-}
-
-.day-chat__input-row {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.day-chat__input {
-  flex: 1;
-  margin-bottom: 0;
-}
-
-.day-chat__send {
-  width: auto;
-  min-width: 60px;
-  margin-bottom: 0;
-}
+/* --- Day tap-to-suspect --- */
 
 .day-chat__spectator {
   font-size: 0.875rem;
   color: var(--neon-pink);
   font-style: italic;
+  margin-top: 0.75rem;
+}
+
+.day-player-item--clickable {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: background-color 0.15s, border-color 0.15s;
+  border: 2px solid transparent;
+}
+
+.day-player-item--clickable:active {
+  opacity: 0.75;
+}
+
+.day-player-item--my-suspect {
+  border-color: var(--neon-yellow);
+  background-color: #2a2a10;
+}
+
+.day-player-item--has-suspects {
+  background-color: #1e1a2e;
+}
+
+.day-player-name {
+  flex: 1;
+  text-align: left;
+}
+
+.suspect-list {
+  font-size: 0.75rem;
+  color: var(--neon-pink);
+  margin-left: 0.5rem;
+  text-align: right;
+  flex-shrink: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- Voting screen --- */
