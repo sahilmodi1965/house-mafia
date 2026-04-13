@@ -164,7 +164,9 @@ export function showCreateScreen(app, onBack) {
       await subscribeToRoom(app, onBack);
       localStorage.setItem('lastRoomCreatedAt', Date.now().toString());
     } catch (err) {
-      errorEl.textContent = 'Failed to create room. Try again.';
+      errorEl.textContent = err && err.message === 'Connection failed — check your internet'
+        ? err.message
+        : 'Failed to create room. Try again.';
     }
   });
 }
@@ -226,7 +228,9 @@ export function showJoinScreen(app, onBack) {
         onBack();
       });
     } catch (err) {
-      if (!errorEl.textContent) {
+      if (err && err.message === 'Connection failed — check your internet') {
+        errorEl.textContent = err.message;
+      } else if (!errorEl.textContent) {
         errorEl.textContent = 'Failed to join room. Try again.';
       }
     }
@@ -238,12 +242,17 @@ export function showJoinScreen(app, onBack) {
 async function subscribeToRoom(app, onBack) {
   appEl = app;
   onBackFn = onBack;
-  channel = supabase.channel(`room:${roomCode}`, {
-    config: {
-      presence: { key: currentPlayer.id },
-      broadcast: { self: true },
-    },
-  });
+
+  function buildChannel() {
+    return supabase.channel(`room:${roomCode}`, {
+      config: {
+        presence: { key: currentPlayer.id },
+        broadcast: { self: true },
+      },
+    });
+  }
+
+  channel = buildChannel();
 
   // Wait for subscribe to complete, then check presence for join validation.
   // For joiners we must wait for the first presence:sync event before validating
@@ -253,6 +262,10 @@ async function subscribeToRoom(app, onBack) {
     // Track whether the joiner validation has already settled (resolved or rejected)
     // so that the sync handler and the timeout don't race each other.
     let joinerSettled = false;
+    // CHANNEL_ERROR retry budget — Supabase Realtime can error on the very first
+    // connection after page load (cold-start) before the websocket is warm. Retry
+    // transparently before surfacing the error to the user.
+    let subscribeRetries = 0;
 
     async function validateJoinerPresence(state) {
       if (joinerSettled) return;
@@ -290,63 +303,83 @@ async function subscribeToRoom(app, onBack) {
       resolve();
     }
 
-    channel
-      .on('presence', { event: 'sync' }, () => {
-        const state = channel.presenceState();
-        if (!isHost && !joinerSettled) {
-          // Joiner: presence:sync is the authoritative moment to validate the room.
-          validateJoinerPresence(state);
-        } else {
-          // Host path, or joiner after initial validation — keep lobby in sync.
-          syncPlayers(state);
-        }
-      })
-      .on('presence', { event: 'join' }, () => {
-        // Handled by sync
-      })
-      .on('presence', { event: 'leave' }, () => {
-        // Handled by sync
-      })
-      .on('broadcast', { event: 'game:start' }, () => {
-        if (isHost) return; // host already triggered startGame locally
-        startGame({
-          channel,
-          privateChannel,
-          supabase,
-          roomCode,
-          players: [...players],
-          currentPlayer,
-          isHost,
-          app: appEl,
-          onReturnToTitle: () => {
-            cleanup();
-            onBack();
-          },
-        });
-      })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          if (isHost) {
-            // Creator: track immediately; no presence validation needed.
-            await channel.track(currentPlayer);
-            try {
-              privateChannel = await subscribeToPrivate(supabase, roomCode, currentPlayer.id);
-            } catch (err) {
-              console.error('Failed to subscribe to private channel', err);
-            }
-            showLobby(app, onBack);
-            resolve();
+    function attachHandlers() {
+      channel
+        .on('presence', { event: 'sync' }, () => {
+          const state = channel.presenceState();
+          if (!isHost && !joinerSettled) {
+            // Joiner: presence:sync is the authoritative moment to validate the room.
+            validateJoinerPresence(state);
           } else {
-            // Joiner: wait up to 3 s for presence:sync before falling back.
-            setTimeout(() => {
-              // If sync already fired and settled, this is a no-op.
-              validateJoinerPresence(channel.presenceState());
-            }, 3000);
+            // Host path, or joiner after initial validation — keep lobby in sync.
+            syncPlayers(state);
           }
-        } else if (status === 'CHANNEL_ERROR') {
-          reject(new Error('Channel error'));
-        }
-      });
+        })
+        .on('presence', { event: 'join' }, () => {
+          // Handled by sync
+        })
+        .on('presence', { event: 'leave' }, () => {
+          // Handled by sync
+        })
+        .on('broadcast', { event: 'game:start' }, () => {
+          if (isHost) return; // host already triggered startGame locally
+          startGame({
+            channel,
+            privateChannel,
+            supabase,
+            roomCode,
+            players: [...players],
+            currentPlayer,
+            isHost,
+            app: appEl,
+            onReturnToTitle: () => {
+              cleanup();
+              onBack();
+            },
+          });
+        })
+        .subscribe(async (status) => {
+          if (status === 'SUBSCRIBED') {
+            if (isHost) {
+              // Creator: track immediately; no presence validation needed.
+              await channel.track(currentPlayer);
+              try {
+                privateChannel = await subscribeToPrivate(supabase, roomCode, currentPlayer.id);
+              } catch (err) {
+                console.error('Failed to subscribe to private channel', err);
+              }
+              showLobby(app, onBack);
+              resolve();
+            } else {
+              // Joiner: wait up to 3 s for presence:sync before falling back.
+              setTimeout(() => {
+                // If sync already fired and settled, this is a no-op.
+                validateJoinerPresence(channel.presenceState());
+              }, 3000);
+            }
+          } else if (status === 'CHANNEL_ERROR') {
+            if (subscribeRetries < GAME.MAX_SUBSCRIBE_RETRIES) {
+              // Supabase Realtime cold-start: tear down and re-subscribe on a
+              // fresh channel after a short backoff.
+              subscribeRetries += 1;
+              try {
+                channel.unsubscribe();
+              } catch (_) {
+                // ignore — channel may already be in an errored state
+              }
+              setTimeout(() => {
+                joinerSettled = false;
+                channel = buildChannel();
+                attachHandlers();
+              }, GAME.SUBSCRIBE_RETRY_BACKOFF_MS);
+            } else {
+              reject(new Error('Connection failed — check your internet'));
+            }
+          }
+        });
+    }
+
+    attachHandlers();
   });
 }
 
