@@ -1,5 +1,7 @@
+import { GAME } from './config.js';
 import { assignRoles } from './roles.js';
 import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
+import { showNightPhase } from './phases/night.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction } from './dev.js';
@@ -208,12 +210,62 @@ export function startGame({
 }) {
   const readySet = new Set();
   const totalPlayers = players.length;
+  // Stash the local player's role data once it arrives on the private
+  // channel — needed later to route the Night phase to the correct screen.
+  let currentRoleData = null;
+  // Local copy of the player list used by the Night phase on non-host
+  // clients. Joiners first learn the full list from the host's
+  // phase:night-start broadcast.
+  let nightPlayerList = players;
+
+  /**
+   * Run the Night phase locally, then advance to Day on completion.
+   * Each client runs its own 30s timer; the host re-synchronizes
+   * everyone with its existing phase:day-discuss broadcast at the end.
+   */
+  function startNightPhase({ eliminatedName = null } = {}) {
+    // Defensive: with fewer than MIN_PLAYERS there's nothing to night over.
+    if (!nightPlayerList || nightPlayerList.length < GAME.MIN_PLAYERS) {
+      startDayPhase({
+        channel,
+        currentPlayer,
+        isHost,
+        app,
+        nightEliminatedName: eliminatedName,
+        onReturnToTitle,
+      });
+      return;
+    }
+
+    showNightPhase({
+      app,
+      channel,
+      players: nightPlayerList,
+      currentPlayer,
+      currentRole: currentRoleData ? currentRoleData.role : null,
+      mafiaPartners: currentRoleData ? currentRoleData.mafiaPartners || [] : [],
+      isHost,
+      onNightEnd: ({ eliminatedPlayer }) => {
+        // #26 scaffold: eliminatedPlayer is always null. #27 will fill
+        // it in once the broadcast/tally mechanics land.
+        startDayPhase({
+          channel,
+          currentPlayer,
+          isHost,
+          app,
+          nightEliminatedName: eliminatedPlayer ? eliminatedPlayer.name : null,
+          onReturnToTitle,
+        });
+      },
+    });
+  }
 
   // Handle this player's role assignment. It arrives on their OWN private
   // channel. The shared `channel` never carries role data.
   const handleRoleAssign = (payload) => {
     const roleData = payload && payload.roleData;
     if (!roleData) return;
+    currentRoleData = roleData;
 
     showRoleReveal(app, roleData, currentPlayer.name, () => {
       // Player tapped Ready — broadcast to everyone on the shared channel.
@@ -247,11 +299,36 @@ export function startGame({
     readySet.add(msg.payload.playerId);
     updateReadyStatus(readySet.size, totalPlayers);
 
-    if (readySet.size >= totalPlayers) {
-      // All players ready — transition to Day (Night not yet implemented)
-      startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null, onReturnToTitle });
+    if (readySet.size >= totalPlayers && isHost) {
+      // Host kicks off Night. Tell every joiner to start Night locally
+      // with the same player list (names only — secrets never traverse
+      // the shared channel). Host then runs Night locally too.
+      gameState.phase = 'night';
+      const publicPlayers = gameState.players.map((p) => ({
+        id: p.id,
+        name: p.name,
+        alive: p.alive,
+        isStub: !!p.isStub,
+      }));
+      channel.send({
+        type: 'broadcast',
+        event: 'phase:night-start',
+        payload: { players: publicPlayers },
+      });
+      nightPlayerList = publicPlayers;
+      startNightPhase();
     }
   });
+
+  // Non-host: listen for Night phase start broadcast from host
+  if (!isHost) {
+    channel.on('broadcast', { event: 'phase:night-start' }, (msg) => {
+      if (msg.payload && Array.isArray(msg.payload.players)) {
+        nightPlayerList = msg.payload.players;
+      }
+      startNightPhase();
+    });
+  }
 
   // Non-host: listen for Day phase broadcast from host
   if (!isHost) {
@@ -355,7 +432,20 @@ export function startGame({
             readySet.add(stubId);
             updateReadyStatus(readySet.size, totalPlayers);
             if (readySet.size >= totalPlayers) {
-              startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName: null });
+              gameState.phase = 'night';
+              const publicPlayers = gameState.players.map((p) => ({
+                id: p.id,
+                name: p.name,
+                alive: p.alive,
+                isStub: !!p.isStub,
+              }));
+              channel.send({
+                type: 'broadcast',
+                event: 'phase:night-start',
+                payload: { players: publicPlayers },
+              });
+              nightPlayerList = publicPlayers;
+              startNightPhase();
             }
           },
         });
