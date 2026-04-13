@@ -246,6 +246,15 @@ export function startGame({
   // Host-owned night tally state. Reset at the start of each Night.
   // Key: voterId (mafia player). Value: targetId.
   let mafiaVotes = new Map();
+  // Town-power picks, reset every Night. #55.
+  // Doctor: set of saved playerIds this Night.
+  let nightSaves = new Set();
+  // Bodyguard: map of protectorId → protectedId, so we can kill the
+  // protector instead of the target when Mafia hit the protected id.
+  let nightProtects = new Map();
+  // Persistent across Nights: doctor's last saved target id, to enforce
+  // "cannot save same player on consecutive Nights". Map doctorId→lastTargetId.
+  const lastDoctorSave = new Map();
 
   // Handle to the active Night screen so the host:investigate-result
   // listener can push the result into the UI asynchronously.
@@ -317,17 +326,55 @@ export function startGame({
   }
 
   /**
-   * Host-side: handle a Host-role investigation request. Looks up the
-   * target's role and returns the result privately to the investigator.
+   * Host-side: record a Doctor save. Enforces:
+   *   - actor must be alive and have doctor role
+   *   - target must be alive
+   *   - target cannot be the same player the doctor saved last Night
+   */
+  function handleDoctorSave(doctorId, targetId) {
+    if (!gameState) return;
+    const doctor = gameState.players.find((p) => p.id === doctorId);
+    if (!doctor || !doctor.alive || doctor.role?.id !== 'doctor') return;
+    const target = gameState.players.find((p) => p.id === targetId);
+    if (!target || !target.alive) return;
+    if (lastDoctorSave.get(doctorId) === targetId) return; // consecutive block
+    nightSaves.add(targetId);
+    lastDoctorSave.set(doctorId, targetId);
+  }
+
+  /**
+   * Host-side: record a Bodyguard protect. Enforces:
+   *   - actor must be alive and have bodyguard role
+   *   - target must be alive and not self
+   */
+  function handleBodyguardProtect(bodyguardId, targetId) {
+    if (!gameState) return;
+    const bg = gameState.players.find((p) => p.id === bodyguardId);
+    if (!bg || !bg.alive || bg.role?.id !== 'bodyguard') return;
+    const target = gameState.players.find((p) => p.id === targetId);
+    if (!target || !target.alive) return;
+    if (bodyguardId === targetId) return;
+    nightProtects.set(bodyguardId, targetId);
+  }
+
+  /**
+   * Host-side: handle a Host-role or Detective investigation request.
+   * Looks up the target's role and returns the result privately to the
+   * investigator. Detective results are INVERTED (#55).
    */
   async function handleHostInvestigate(investigatorId, targetId) {
     if (!gameState) return;
     const investigator = gameState.players.find((p) => p.id === investigatorId);
-    if (!investigator || investigator.role?.id !== 'host') return;
+    const investigatorRoleId = investigator && investigator.role && investigator.role.id;
+    if (investigatorRoleId !== 'host' && investigatorRoleId !== 'detective') return;
     const target = gameState.players.find((p) => p.id === targetId);
     if (!target) return;
 
-    const result = target.role?.id === 'mafia' ? 'mafia' : 'not-mafia';
+    const isMafia = target.role?.id === 'mafia';
+    const result =
+      investigatorRoleId === 'detective'
+        ? isMafia ? 'not-mafia' : 'mafia' // inverted
+        : isMafia ? 'mafia' : 'not-mafia';
 
     // Stubs have no client to hear the result — just drop it.
     if (investigator.isStub) return;
@@ -411,8 +458,10 @@ export function startGame({
     }
 
     // Fresh tally each Night. Cleared on every client call but only
-    // the host actually consumes mafiaVotes — joiners never touch it.
+    // the host actually consumes these — joiners never touch them.
     mafiaVotes = new Map();
+    nightSaves = new Set();
+    nightProtects = new Map();
 
     const localRoleId = currentRoleData && currentRoleData.role && currentRoleData.role.id;
     const gameHostId = getGameHostId();
@@ -480,19 +529,70 @@ export function startGame({
           console.error('Failed to send host:investigate', err);
         }
       },
+      onNightActionSelected: async ({ kind, target }) => {
+        // Detective/Doctor/Bodyguard route their picks on a single
+        // generic 'night:action' event so game.js on the game host
+        // can dispatch to the right handler. The event name stays
+        // private (sent on the game host's private channel).
+        const ch = await ensureHostPrivateWriteHandle();
+        if (!ch) return;
+        try {
+          await ch.send({
+            type: 'broadcast',
+            event: 'night:action',
+            payload: {
+              kind, // 'investigate-inverted' | 'save' | 'protect'
+              actorId: currentPlayer.id,
+              targetId: target.id,
+            },
+          });
+        } catch (err) {
+          console.error('Failed to send night:action', err);
+        }
+      },
       onNightEnd: () => {
         if (isHost) {
-          // Host tallies, applies the kill, and broadcasts the result.
+          // Host tallies the Mafia pick, then applies town-power
+          // mitigations (#55):
+          //   1. Doctor save — if the target is in nightSaves, the
+          //      kill is blocked and no one dies that Night.
+          //   2. Bodyguard protect — if the target was protected by
+          //      any Bodyguard, the Bodyguard dies instead. The
+          //      protected player lives.
+          // Both mitigations run even if the composer disabled the
+          // corresponding role — the sets are just empty.
           const killedId = resolveMafiaKill();
           let eliminatedPlayer = null;
           if (killedId) {
-            const target = gameState.players.find((p) => p.id === killedId);
-            if (target && target.alive) {
-              target.alive = false;
-              eliminatedPlayer = {
-                id: target.id,
-                name: target.name,
-              };
+            if (nightSaves.has(killedId)) {
+              // Kill blocked by Doctor save. No elimination tonight.
+            } else {
+              // Check if this target was protected by any Bodyguard.
+              // First match wins (typically only one Bodyguard).
+              let protectorId = null;
+              for (const [bgId, protectedId] of nightProtects.entries()) {
+                if (protectedId === killedId) {
+                  const bg = gameState.players.find((p) => p.id === bgId);
+                  if (bg && bg.alive) {
+                    protectorId = bgId;
+                    break;
+                  }
+                }
+              }
+              if (protectorId) {
+                // Bodyguard dies in target's place.
+                const bg = gameState.players.find((p) => p.id === protectorId);
+                if (bg && bg.alive) {
+                  bg.alive = false;
+                  eliminatedPlayer = { id: bg.id, name: bg.name };
+                }
+              } else {
+                const target = gameState.players.find((p) => p.id === killedId);
+                if (target && target.alive) {
+                  target.alive = false;
+                  eliminatedPlayer = { id: target.id, name: target.name };
+                }
+              }
             }
           }
           gameState.phase = 'night-end';
@@ -573,14 +673,34 @@ export function startGame({
               if (targetId) recordMafiaVote(stubId, targetId);
             },
           });
-        } else if (stubRoleId === 'host') {
+        } else if (stubRoleId === 'host' || stubRoleId === 'detective') {
           const targets = alive.filter((p) => p.id !== stub.id);
-          scheduleStubAction('host-investigate', {
+          scheduleStubAction(`${stubRoleId}-investigate`, {
             stubId: stub.id,
             targets,
             delayMs: 1500 + Math.random() * 3000,
             onResolve: ({ stubId, targetId }) => {
               if (targetId) handleHostInvestigate(stubId, targetId);
+            },
+          });
+        } else if (stubRoleId === 'doctor') {
+          const targets = alive.filter((p) => p.id !== stub.id);
+          scheduleStubAction('doctor-save', {
+            stubId: stub.id,
+            targets,
+            delayMs: 1500 + Math.random() * 3000,
+            onResolve: ({ stubId, targetId }) => {
+              if (targetId) handleDoctorSave(stubId, targetId);
+            },
+          });
+        } else if (stubRoleId === 'bodyguard') {
+          const targets = alive.filter((p) => p.id !== stub.id);
+          scheduleStubAction('bodyguard-protect', {
+            stubId: stub.id,
+            targets,
+            delayMs: 1500 + Math.random() * 3000,
+            onResolve: ({ stubId, targetId }) => {
+              if (targetId) handleBodyguardProtect(stubId, targetId);
             },
           });
         }
@@ -648,6 +768,23 @@ export function startGame({
         const { investigatorId, targetId } = msg.payload || {};
         if (investigatorId && targetId) {
           handleHostInvestigate(investigatorId, targetId);
+        }
+      });
+      privateChannel.on('broadcast', { event: 'night:action' }, (msg) => {
+        const { kind, actorId, targetId } = msg.payload || {};
+        if (!actorId || !targetId) return;
+        switch (kind) {
+          case 'investigate-inverted':
+            handleHostInvestigate(actorId, targetId);
+            break;
+          case 'save':
+            handleDoctorSave(actorId, targetId);
+            break;
+          case 'protect':
+            handleBodyguardProtect(actorId, targetId);
+            break;
+          default:
+            break;
         }
       });
     }

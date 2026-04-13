@@ -39,9 +39,11 @@ export function showNightPhase({
   isHost, // eslint-disable-line no-unused-vars
   onTargetSelected,
   onInvestigateSelected,
+  onNightActionSelected,
   onNightEnd,
 }) {
   const roleId = currentRole && currentRole.id;
+  const nightActionKind = currentRole && currentRole.nightActionKind;
 
   // Only alive players can be targeted. Players lacking an explicit
   // `alive` flag (first night) are assumed alive.
@@ -67,23 +69,38 @@ export function showNightPhase({
   const HOST_INVESTIGATE_GRACE_MS = 3000;
   let graceTimeout = null;
 
-  const headerText =
-    roleId === 'mafia'
-      ? 'Night -- Mafia, choose your target'
-      : roleId === 'host'
-      ? 'Night -- Investigate one player'
-      : 'Night time...';
-
-  const subtitleHTML =
-    roleId === 'mafia' && mafiaPartners.length > 0
-      ? `<p class="night-subtitle">Your fellow mafia: ${mafiaPartners
-          .map((m) => m.name)
-          .join(', ')}</p>`
-      : roleId === 'mafia'
-      ? '<p class="night-subtitle">You are the only mafia.</p>'
-      : roleId === 'host'
-      ? '<p class="night-subtitle">Pick a player to learn if they are Mafia.</p>'
-      : '<p class="night-subtitle">The mafia are choosing a target. Sit tight.</p>';
+  // Per-role copy table. Keeps the header/subtitle/button prompts
+  // centralized and readable rather than stacking ternaries.
+  const ROLE_COPY = {
+    mafia: {
+      header: 'Night -- Mafia, choose your target',
+      subtitle: mafiaPartners.length > 0
+        ? `Your fellow mafia: ${mafiaPartners.map((m) => m.name).join(', ')}`
+        : 'You are the only mafia.',
+    },
+    host: {
+      header: 'Night -- Investigate one player',
+      subtitle: 'Pick a player to learn if they are Mafia.',
+    },
+    detective: {
+      header: 'Night -- Detective, pick a suspect',
+      subtitle: 'Your result is INVERTED: "Mafia" means safe, "Not Mafia" means danger.',
+    },
+    doctor: {
+      header: 'Night -- Doctor, pick who to save',
+      subtitle: 'If Mafia target them, the kill is blocked. No back-to-back same save.',
+    },
+    bodyguard: {
+      header: 'Night -- Bodyguard, pick who to protect',
+      subtitle: 'If Mafia target them, you die instead. One-shot.',
+    },
+  };
+  const copy = ROLE_COPY[roleId] || {
+    header: 'Night time...',
+    subtitle: 'The mafia are choosing a target. Sit tight.',
+  };
+  const headerText = copy.header;
+  const subtitleHTML = `<p class="night-subtitle">${copy.subtitle}</p>`;
 
   // Targetable players: everyone alive except self. Mafia cannot target
   // their own mafia partners — filter those out too.
@@ -94,7 +111,8 @@ export function showNightPhase({
     return true;
   });
 
-  const showsButtons = roleId === 'mafia' || roleId === 'host';
+  // Any role with a nightActionKind gets a button list.
+  const showsButtons = !!nightActionKind;
 
   const buttonsHTML = showsButtons
     ? targetablePlayers
@@ -126,7 +144,10 @@ export function showNightPhase({
     GAME.NIGHT_DURATION,
     null,
     () => {
-      if (roleId === 'host' && investigationResultShownAt > 0) {
+      if (
+        (nightActionKind === 'investigate' || nightActionKind === 'investigate-inverted') &&
+        investigationResultShownAt > 0
+      ) {
         const elapsed = Date.now() - investigationResultShownAt;
         const remaining = HOST_INVESTIGATE_GRACE_MS - elapsed;
         if (remaining > 0) {
@@ -162,7 +183,10 @@ export function showNightPhase({
     }
   }
 
-  // Click handling for Mafia / Host
+  // Click handling dispatched by nightActionKind. Mafia / Host keep
+  // their dedicated callbacks for backwards compatibility with the
+  // existing game.js routing; detective/doctor/bodyguard use the
+  // generic onNightActionSelected hook.
   if (showsButtons) {
     const container = document.getElementById('night-buttons');
     container.addEventListener('click', (e) => {
@@ -177,15 +201,42 @@ export function showNightPhase({
 
       const targetId = btn.dataset.playerId;
       const target = targetablePlayers.find((p) => p.id === targetId) || null;
+      if (!target) return;
 
-      if (roleId === 'mafia') {
-        selectedTarget = target;
-        updateStatus(target ? `Target: ${target.name}` : '');
-        if (target && onTargetSelected) onTargetSelected(target);
-      } else if (roleId === 'host') {
-        selectedInvestigation = target;
-        updateStatus(target ? `Investigating: ${target.name}...` : '');
-        if (target && onInvestigateSelected) onInvestigateSelected(target);
+      switch (nightActionKind) {
+        case 'mafia-kill':
+          selectedTarget = target;
+          updateStatus(`Target: ${target.name}`);
+          if (onTargetSelected) onTargetSelected(target);
+          break;
+        case 'investigate':
+          selectedInvestigation = target;
+          updateStatus(`Investigating: ${target.name}...`);
+          if (onInvestigateSelected) onInvestigateSelected(target);
+          break;
+        case 'investigate-inverted':
+          selectedInvestigation = target;
+          updateStatus(`Investigating: ${target.name}...`);
+          if (onNightActionSelected) {
+            onNightActionSelected({ kind: nightActionKind, target });
+          }
+          break;
+        case 'save':
+          selectedTarget = target;
+          updateStatus(`Saving: ${target.name}`);
+          if (onNightActionSelected) {
+            onNightActionSelected({ kind: nightActionKind, target });
+          }
+          break;
+        case 'protect':
+          selectedTarget = target;
+          updateStatus(`Protecting: ${target.name}`);
+          if (onNightActionSelected) {
+            onNightActionSelected({ kind: nightActionKind, target });
+          }
+          break;
+        default:
+          break;
       }
     });
   }
@@ -197,7 +248,10 @@ export function showNightPhase({
    * threaded through onNightEnd too.
    */
   function showInvestigationResult(result, targetName) {
-    if (ended || roleId !== 'host') return;
+    if (ended) return;
+    if (nightActionKind !== 'investigate' && nightActionKind !== 'investigate-inverted') {
+      return;
+    }
     investigationResult = result;
     investigationResultShownAt = Date.now();
     const label = result === 'mafia' ? 'Mafia' : 'Not Mafia';
