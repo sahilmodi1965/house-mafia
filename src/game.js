@@ -223,6 +223,7 @@ export function startGame({
   isHost,
   app,
   onReturnToTitle,
+  roomConfig, // #54: { preset, disabledRoles, ...durations }
 }) {
   const readySet = new Set();
   const totalPlayers = players.length;
@@ -742,8 +743,12 @@ export function startGame({
   }
 
   if (isHost) {
-    // Host runs role assignment
-    const assignments = assignRoles(players);
+    // Host runs role assignment. #54: honor the host's custom settings
+    // (preset + disabled optional roles) picked in the lobby modal.
+    const assignments = assignRoles(players, {
+      preset: (roomConfig && roomConfig.preset) || 'classic',
+      disabledRoles: (roomConfig && roomConfig.disabledRoles) || [],
+    });
     const stubPlayers = DEV_MODE ? players.filter(p => p.isStub) : [];
 
     // Initialize game state on host

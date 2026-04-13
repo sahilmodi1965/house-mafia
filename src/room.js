@@ -3,6 +3,11 @@ import { startGame } from './game.js';
 import { DEV_MODE, createStubPlayer, devStorage } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 import { showSpectator } from './phases/spectator.js';
+import {
+  openSettingsModal,
+  defaultRoomConfig,
+  applyRoomConfig,
+} from './ui/settings-modal.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -24,6 +29,11 @@ let appEl = null;
 let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
 let gcIntervalId = null;
 let lastNonHostSeenAt = 0;
+// Issue #54: custom game settings chosen by the host before Start.
+// On the host this is also the write-through source for GAME.*_DURATION
+// mutations (applyRoomConfig). Peers populate it from lobby:config
+// broadcasts so their lobby UI reflects the host's picks.
+let roomConfig = defaultRoomConfig();
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -497,6 +507,20 @@ async function subscribeToRoom(app, onBack) {
         .on('presence', { event: 'leave' }, () => {
           // Handled by sync
         })
+        .on('broadcast', { event: 'lobby:config' }, (msg) => {
+          // Issue #54: host has updated game settings. Peers mirror
+          // them locally so their phase timers match and their lobby
+          // UI re-renders with the latest values.
+          if (isHost) return;
+          const cfg = msg.payload && msg.payload.config;
+          if (!cfg) return;
+          roomConfig = cfg;
+          applyRoomConfig(cfg);
+          // Re-render lobby if we're on it, so the "Settings updated"
+          // state is visible. The lobby render is cheap and idempotent.
+          const lobbyEl = document.getElementById('screen-lobby');
+          if (lobbyEl) renderLobby();
+        })
         .on('broadcast', { event: 'game:start' }, () => {
           if (isHost) return; // host already triggered startGame locally
           // Spectators (late joiners) stay on the spectator screen and
@@ -515,6 +539,7 @@ async function subscribeToRoom(app, onBack) {
               cleanup();
               onBack();
             },
+            roomConfig,
           });
         })
         .subscribe(async (status) => {
@@ -570,13 +595,19 @@ function showLobby(app, onBack) {
     ? `<button class="btn btn--yellow" id="btn-add-stub">Add Stub Player</button>`
     : '';
 
+  const settingsBtn = isHost
+    ? `<button class="btn btn--cyan" id="btn-settings">Settings</button>`
+    : '';
+
   app.innerHTML = `
     <div id="screen-lobby" class="screen active">
       <h1>Lobby</h1>
       <p class="room-code-display">Room Code: <span id="lobby-code">${roomCode}</span></p>
       <p class="player-count" id="lobby-count">${players.length}/${GAME.MAX_PLAYERS}</p>
       <ul class="player-list" id="lobby-players"></ul>
+      <p class="lobby-config" id="lobby-config"></p>
       <div id="lobby-actions"></div>
+      ${settingsBtn}
       ${devStubRow}
       <button class="btn btn--cyan" id="btn-leave-lobby">Leave</button>
     </div>
@@ -586,6 +617,31 @@ function showLobby(app, onBack) {
     cleanup();
     onBack();
   });
+
+  if (isHost) {
+    const settingsEl = document.getElementById('btn-settings');
+    if (settingsEl) {
+      settingsEl.addEventListener('click', () => {
+        openSettingsModal({
+          currentConfig: roomConfig,
+          playerCount: players.length,
+          onSave: (newConfig) => {
+            roomConfig = newConfig;
+            applyRoomConfig(newConfig);
+            // Broadcast to peers so their lobby + phase timers match.
+            if (channel) {
+              channel.send({
+                type: 'broadcast',
+                event: 'lobby:config',
+                payload: { config: newConfig },
+              });
+            }
+            renderLobby();
+          },
+        });
+      });
+    }
+  }
 
   if (DEV_MODE && isHost) {
     document.getElementById('btn-add-stub').addEventListener('click', () => {
@@ -607,6 +663,17 @@ function renderLobby() {
   if (!listEl || !countEl || !actionsEl) return;
 
   countEl.textContent = `${players.length}/${GAME.MAX_PLAYERS}`;
+
+  // Render current room-settings summary so every player (host and
+  // peers) sees what the game will be tuned to. Updates in-place when
+  // the host saves the settings modal (or when a peer receives a
+  // lobby:config broadcast and calls renderLobby).
+  const configEl = document.getElementById('lobby-config');
+  if (configEl) {
+    const disabledCount = (roomConfig.disabledRoles || []).length;
+    const disabledSuffix = disabledCount > 0 ? `, ${disabledCount} role${disabledCount === 1 ? '' : 's'} off` : '';
+    configEl.textContent = `Night ${roomConfig.nightDuration}s · Discuss ${roomConfig.discussionDuration}s · Vote ${roomConfig.voteDuration}s · ${roomConfig.preset}${disabledSuffix}`;
+  }
 
   listEl.innerHTML = players
     .map(
@@ -669,6 +736,7 @@ function renderLobby() {
             cleanup();
             if (back) back();
           },
+          roomConfig,
         });
       });
     }
@@ -696,4 +764,5 @@ function cleanup() {
   roomCode = null;
   appEl = null;
   onBackFn = null;
+  roomConfig = defaultRoomConfig();
 }
