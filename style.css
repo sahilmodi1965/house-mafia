@@ -261,6 +261,58 @@ h1 {
   to { opacity: 0.6; transform: scale(1.1); }
 }
 
+/* --- Night phase screen --- */
+
+.screen-night h1 {
+  font-size: 1.375rem;
+  color: var(--neon-cyan);
+  margin-bottom: 0.5rem;
+  line-height: 1.2;
+}
+
+.screen-night--mafia h1 {
+  color: var(--neon-pink);
+}
+
+.screen-night--host h1 {
+  color: var(--neon-cyan);
+}
+
+.screen-night--guest h1 {
+  color: var(--neon-yellow);
+}
+
+.night-subtitle {
+  font-size: 0.9375rem;
+  color: var(--text-muted, #aaa);
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background-color: var(--surface);
+  border-radius: 6px;
+  line-height: 1.4;
+}
+
+.night-buttons {
+  margin-top: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.night-btn {
+  margin-bottom: 0.5rem;
+}
+
+.night-btn--selected {
+  background-color: var(--neon-yellow);
+  color: var(--bg);
+}
+
+.night-status {
+  font-size: 0.875rem;
+  color: var(--neon-cyan);
+  min-height: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+
 /* --- Day discussion screen --- */
 
 .day-announcement {
