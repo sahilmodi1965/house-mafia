@@ -194,6 +194,7 @@ async function subscribeToRoom(app, onBack) {
         // Handled by sync
       })
       .on('broadcast', { event: 'game:start' }, () => {
+        if (isHost) return; // host already triggered startGame locally
         startGame({
           channel,
           players: [...players],
