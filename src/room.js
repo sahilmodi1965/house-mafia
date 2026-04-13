@@ -172,7 +172,10 @@ export function showJoinScreen(app, onBack) {
 async function subscribeToRoom(app, onBack) {
   appEl = app;
   channel = supabase.channel(`room:${roomCode}`, {
-    config: { presence: { key: currentPlayer.id } },
+    config: {
+      presence: { key: currentPlayer.id },
+      broadcast: { self: true },
+    },
   });
 
   // Wait for subscribe to complete, then check presence for join validation
