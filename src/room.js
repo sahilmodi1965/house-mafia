@@ -2,6 +2,7 @@ import { GAME } from './config.js';
 import { startGame } from './game.js';
 import { DEV_MODE, createStubPlayer, devStorage } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
+import { showSpectator } from './phases/spectator.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -14,6 +15,10 @@ let privateChannel = null; // this player's own per-player private channel
 let currentPlayer = null;
 let players = [];
 let isHost = false;
+// Late joiner who arrived after the host flipped its presence phase
+// to 'running'. Spectators stay subscribed to the shared channel but
+// never start a game loop. Issue #35.
+let isSpectator = false;
 let roomCode = null;
 let appEl = null;
 let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
@@ -186,7 +191,11 @@ function syncPlayers(state) {
     const presences = state[key];
     if (presences && presences.length > 0) {
       // Use the most recent presence for each key
-      players.push(presences[presences.length - 1]);
+      const latest = presences[presences.length - 1];
+      // Spectators (late joiners) are tracked on the same channel but
+      // must not appear in the lobby player roster — issue #35.
+      if (latest && latest.isSpectator) continue;
+      players.push(latest);
     }
   }
   // Re-append stubs (they are local-only, not in Supabase presence)
@@ -194,6 +203,38 @@ function syncPlayers(state) {
     players.push(stub);
   }
   renderLobby();
+}
+
+/**
+ * Inspect a Supabase presence snapshot and return whether the game host
+ * has advertised `phase === 'running'`. Used by joiner validation to
+ * decide whether to route as a player or as a spectator.
+ */
+function hostGameRunning(state) {
+  for (const key of Object.keys(state)) {
+    const presences = state[key];
+    if (!presences || presences.length === 0) continue;
+    const latest = presences[presences.length - 1];
+    if (latest && latest.isHost && latest.phase === 'running') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Count presence entries flagged as spectators (excluding ourselves).
+ */
+function countSpectators(state, excludeId) {
+  let n = 0;
+  for (const key of Object.keys(state)) {
+    if (key === excludeId) continue;
+    const presences = state[key];
+    if (!presences || presences.length === 0) continue;
+    const latest = presences[presences.length - 1];
+    if (latest && latest.isSpectator) n += 1;
+  }
+  return n;
 }
 
 // --- Create Room ---
@@ -241,6 +282,10 @@ export function showCreateScreen(app, onBack) {
       id: generatePlayerId(),
       name,
       isHost: true,
+      // Advertise the game phase via presence so late joiners can tell
+      // whether to enter the lobby or the read-only spectator view.
+      // Flipped to 'running' right before game:start broadcasts.
+      phase: 'lobby',
     };
 
     try {
@@ -367,6 +412,53 @@ async function subscribeToRoom(app, onBack) {
         return;
       }
 
+      // Issue #35: if the host has flipped its presence phase to
+      // 'running', this joiner missed the role:assign broadcast. Route
+      // them to a read-only spectator view instead of the lobby.
+      if (hostGameRunning(state)) {
+        const existingSpectators = countSpectators(state, currentPlayer.id);
+        if (existingSpectators >= GAME.MAX_SPECTATORS) {
+          channel.unsubscribe();
+          channel = null;
+          const errorEl = document.getElementById('join-error');
+          if (errorEl) {
+            errorEl.textContent = `Spectator slots are full (${GAME.MAX_SPECTATORS}/${GAME.MAX_SPECTATORS}).`;
+          }
+          reject(new Error('Spectators full'));
+          return;
+        }
+
+        isSpectator = true;
+        const spectatorPlayer = { ...currentPlayer, isSpectator: true };
+        currentPlayer = spectatorPlayer;
+        await channel.track(spectatorPlayer);
+
+        // Seed the spectator view from the current public roster we can
+        // see in presence (players who were NOT flagged as spectators).
+        const seedPlayers = [];
+        for (const key of Object.keys(state)) {
+          const presences = state[key];
+          if (!presences || presences.length === 0) continue;
+          const latest = presences[presences.length - 1];
+          if (latest && !latest.isSpectator) {
+            seedPlayers.push({ id: latest.id, name: latest.name });
+          }
+        }
+
+        showSpectator({
+          app,
+          channel,
+          roomCode,
+          initialPlayers: seedPlayers,
+          onLeave: () => {
+            cleanup();
+            onBack();
+          },
+        });
+        resolve();
+        return;
+      }
+
       if (currentCount >= GAME.MAX_PLAYERS) {
         channel.unsubscribe();
         channel = null;
@@ -407,6 +499,9 @@ async function subscribeToRoom(app, onBack) {
         })
         .on('broadcast', { event: 'game:start' }, () => {
           if (isHost) return; // host already triggered startGame locally
+          // Spectators (late joiners) stay on the spectator screen and
+          // must not enter the game loop. Issue #35.
+          if (isSpectator) return;
           startGame({
             channel,
             privateChannel,
@@ -530,7 +625,18 @@ function renderLobby() {
     `;
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
-      startBtn.addEventListener('click', () => {
+      startBtn.addEventListener('click', async () => {
+        // Issue #35: advertise the running phase via presence BEFORE
+        // broadcasting game:start so anyone joining between now and the
+        // role:assign fanout sees the host as in-game and routes to
+        // spectator instead of the lobby.
+        currentPlayer = { ...currentPlayer, phase: 'running' };
+        try {
+          await channel.track(currentPlayer);
+        } catch (err) {
+          console.error('Failed to re-track host presence as running', err);
+        }
+
         // Real (non-stub) players receive the broadcast
         const realPlayers = players.filter(p => !p.isStub);
         if (realPlayers.length > 1) {
@@ -578,6 +684,7 @@ function cleanup() {
   currentPlayer = null;
   players = [];
   isHost = false;
+  isSpectator = false;
   roomCode = null;
   appEl = null;
   onBackFn = null;
