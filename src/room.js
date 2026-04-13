@@ -17,6 +17,8 @@ let isHost = false;
 let roomCode = null;
 let appEl = null;
 let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
+let gcIntervalId = null;
+let lastNonHostSeenAt = 0;
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -123,6 +125,55 @@ function generatePlayerId() {
     // ephemeral id so the current session still works.
     return createRandomClientId();
   }
+}
+
+// --- Room garbage collection (host-side) ---
+
+/**
+ * Count non-host occupants currently in the room. Reads the Supabase
+ * presence state, excludes the host's own key, then adds the number of
+ * local stub players — stubs are local-only and never appear in presence
+ * state, but they count as occupants for GC purposes.
+ */
+function countNonHostOccupants() {
+  let count = 0;
+  if (channel && typeof channel.presenceState === 'function') {
+    const state = channel.presenceState();
+    for (const key of Object.keys(state)) {
+      if (currentPlayer && key === currentPlayer.id) continue;
+      const presences = state[key];
+      if (presences && presences.length > 0) count += 1;
+    }
+  }
+  const stubCount = players.filter((p) => p.isStub).length;
+  return count + stubCount;
+}
+
+function gcTick() {
+  if (!channel || !isHost) return;
+  if (countNonHostOccupants() > 0) {
+    lastNonHostSeenAt = Date.now();
+    return;
+  }
+  if (Date.now() - lastNonHostSeenAt > GAME.ROOM_GC_ABANDON_THRESHOLD_MS) {
+    const back = onBackFn;
+    cleanup();
+    if (back) back();
+  }
+}
+
+function startRoomGC() {
+  if (gcIntervalId != null) return;
+  lastNonHostSeenAt = Date.now();
+  gcIntervalId = setInterval(gcTick, GAME.ROOM_GC_CHECK_INTERVAL_MS);
+}
+
+function stopRoomGC() {
+  if (gcIntervalId != null) {
+    clearInterval(gcIntervalId);
+    gcIntervalId = null;
+  }
+  lastNonHostSeenAt = 0;
 }
 
 // --- Presence handling ---
@@ -381,6 +432,7 @@ async function subscribeToRoom(app, onBack) {
               } catch (err) {
                 console.error('Failed to subscribe to private channel', err);
               }
+              startRoomGC();
               showLobby(app, onBack);
               resolve();
             } else {
@@ -514,6 +566,7 @@ function renderLobby() {
 // --- Cleanup ---
 
 function cleanup() {
+  stopRoomGC();
   if (channel) {
     channel.unsubscribe();
     channel = null;
