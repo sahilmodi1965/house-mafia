@@ -1,5 +1,6 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
+import { DEV_MODE, scheduleStubAction } from '../dev.js';
 
 /**
  * Voting phase.
@@ -149,6 +150,46 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
       }, 3000);
     });
     hostTimer.start();
+
+    // In dev mode, auto-cast votes for stub players
+    if (DEV_MODE) {
+      const stubAlive = alivePlayers.filter(p => p.isStub);
+      for (const stub of stubAlive) {
+        // Stubs vote for a random alive non-stub player that isn't themselves
+        const targets = alivePlayers.filter(p => p.id !== stub.id && !p.isStub);
+        scheduleStubAction('vote', {
+          stubId: stub.id,
+          targets: targets.length > 0 ? targets : alivePlayers.filter(p => p.id !== stub.id),
+          delayMs: 1000 + Math.random() * 1500,
+          onResolve: ({ stubId, targetId }) => {
+            if (!votes[stubId] && targetId) {
+              votes[stubId] = targetId;
+              updateVoteStatus();
+              if (Object.keys(votes).length >= alivePlayers.length) {
+                hostTimer.stop();
+                timer.sync(0);
+                disableAllButtons();
+                const result = resolveVotes();
+                channel.send({
+                  type: 'broadcast',
+                  event: 'phase:day-result',
+                  payload: {
+                    eliminatedPlayerId: result.eliminatedPlayer?.id || null,
+                    eliminatedPlayerName: result.eliminatedPlayer?.name || null,
+                    eliminatedPlayerRole: result.eliminatedPlayer?.role || null,
+                    votes: result.votes,
+                  },
+                });
+                showResult(result.eliminatedPlayer);
+                setTimeout(() => {
+                  if (onVoteResult) onVoteResult(result);
+                }, 3000);
+              }
+            }
+          },
+        });
+      }
+    }
 
     // Listen for votes from other players
     channel.on('broadcast', { event: 'vote:cast' }, (msg) => {
