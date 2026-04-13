@@ -2,14 +2,15 @@ import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
 
 /**
- * Night phase — scaffold (issue #26).
+ * Night phase — mafia kill + host investigate (issues #26 + #27).
  *
  * Renders one of three role-specific screens for the local player and
- * runs a 30s countdown. Collects the Mafia's target pick and Host's
- * investigation pick into LOCAL state only — nothing is broadcast or
- * applied to game state in this PR. When the timer expires, the caller's
- * onNightEnd is invoked with placeholder `null` values; the tally/kill/
- * investigation mechanics land in issue #27.
+ * runs a 30s countdown. Target picks are reported immediately to the
+ * caller via onTargetSelected / onInvestigateSelected so game.js can
+ * broadcast them on the appropriate (private) channel. Investigation
+ * results arrive asynchronously from the game host on the investigator's
+ * private channel — game.js feeds them back to this screen via the
+ * returned `showInvestigationResult` handle.
  */
 
 /**
@@ -17,13 +18,16 @@ import { createTimer } from '../ui/timer.js';
  *
  * @param {Object} opts
  * @param {HTMLElement} opts.app - Root app element
- * @param {Object} opts.channel - Supabase Realtime channel (reserved for #27)
+ * @param {Object} opts.channel - Shared Supabase Realtime channel (reserved)
  * @param {Array}  opts.players - Array of { id, name, alive, isStub } — alive flag optional
  * @param {Object} opts.currentPlayer - { id, name }
  * @param {Object} opts.currentRole - { id, name, emoji, color } — local player's role
  * @param {Array}  [opts.mafiaPartners] - Partner list for mafia role (names only used)
  * @param {boolean} opts.isHost - Whether this client is the game host
- * @param {Function} opts.onNightEnd - Called with { eliminatedPlayer, investigationResult }
+ * @param {Function} [opts.onTargetSelected] - Called with target player when Mafia picks
+ * @param {Function} [opts.onInvestigateSelected] - Called with target player when Host picks
+ * @param {Function} opts.onNightEnd - Called with { localPick, localInvestigation, investigationResult }
+ * @returns {{ showInvestigationResult: (result: 'mafia'|'not-mafia', targetName: string) => void }}
  */
 export function showNightPhase({
   app,
@@ -33,6 +37,8 @@ export function showNightPhase({
   currentRole,
   mafiaPartners = [],
   isHost, // eslint-disable-line no-unused-vars
+  onTargetSelected,
+  onInvestigateSelected,
   onNightEnd,
 }) {
   const roleId = currentRole && currentRole.id;
@@ -41,9 +47,13 @@ export function showNightPhase({
   // `alive` flag (first night) are assumed alive.
   const alivePlayers = players.filter((p) => p.alive !== false);
 
-  // Local-only state — not broadcast in #26.
+  // Local pick state. Picks are reported upward via onTargetSelected /
+  // onInvestigateSelected as soon as they happen so game.js can route
+  // them on the appropriate private channel. Investigation results come
+  // back asynchronously and are displayed via showInvestigationResult.
   let selectedTarget = null;
   let selectedInvestigation = null;
+  let investigationResult = null; // 'mafia' | 'not-mafia'
   let ended = false;
 
   const headerText =
@@ -115,13 +125,11 @@ export function showNightPhase({
     if (ended) return;
     ended = true;
     timer.stop();
-    // Placeholders — real values come from #27.
     if (onNightEnd) {
       onNightEnd({
-        eliminatedPlayer: null,
-        investigationResult: null,
         localPick: selectedTarget,
         localInvestigation: selectedInvestigation,
+        investigationResult,
       });
     }
   }
@@ -145,10 +153,27 @@ export function showNightPhase({
       if (roleId === 'mafia') {
         selectedTarget = target;
         updateStatus(target ? `Target: ${target.name}` : '');
+        if (target && onTargetSelected) onTargetSelected(target);
       } else if (roleId === 'host') {
         selectedInvestigation = target;
-        updateStatus(target ? `Investigating: ${target.name}` : '');
+        updateStatus(target ? `Investigating: ${target.name}...` : '');
+        if (target && onInvestigateSelected) onInvestigateSelected(target);
       }
     });
   }
+
+  /**
+   * Called by game.js when the Host's investigation result arrives on
+   * the investigator's private channel. Displays it in the status line
+   * so the Host sees it before Night ends, and stashes it so it can be
+   * threaded through onNightEnd too.
+   */
+  function showInvestigationResult(result, targetName) {
+    if (ended || roleId !== 'host') return;
+    investigationResult = result;
+    const label = result === 'mafia' ? 'Mafia' : 'Not Mafia';
+    updateStatus(`${targetName} is ${label}.`);
+  }
+
+  return { showInvestigationResult };
 }
