@@ -64,16 +64,15 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
     isHost,
     eliminatedName: nightEliminatedName,
     onDiscussionEnd: () => {
-      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+      // Host-only: the host's local timer fires this callback when
+      // discussion ends. The non-host transition to voting is driven
+      // by the host's phase:day-vote broadcast, which is handled by a
+      // one-time listener attached at game-start in startGame().
+      if (isHost) {
+        startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+      }
     },
   });
-
-  // Non-host listens for vote transition
-  if (!isHost) {
-    channel.on('broadcast', { event: 'phase:day-vote' }, () => {
-      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
-    });
-  }
 }
 
 /**
@@ -172,12 +171,29 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
           onReturnToTitle,
         });
       } else {
-        // Transition to next Night (not yet implemented)
-        console.log('Day phase complete. Transitioning to Night phase...');
+        // No winner yet — loop back to a fresh Night. The host
+        // re-broadcasts phase:night-start from inside startNightPhase
+        // (via the public players list) so joiners re-enter Night too.
+        // Non-host clients reach here via phase:day-result → onVoteResult
+        // but they simply wait — startNightPhase is a no-op for them
+        // until the host's phase:night-start broadcast fires below.
+        if (isHost) {
+          hostStartNextNight();
+        }
       }
     },
   });
 }
+
+/**
+ * Host-only: kick off the next Night round. Updates gameState.phase,
+ * broadcasts phase:night-start to every joiner with the latest player
+ * list (alive flags refreshed), and runs the Night locally. Per-round
+ * tally state (mafiaVotes) is reset inside startNightPhase itself.
+ *
+ * Set inside startGame() because it closes over channel/currentPlayer/etc.
+ */
+let hostStartNextNight = () => {};
 
 /**
  * Start the game. Called when game:start is triggered.
@@ -356,6 +372,30 @@ export function startGame({
    * to Day with the same eliminated-player announcement.
    */
   function startNightPhase({ eliminatedName = null } = {}) {
+    // On the host, refresh nightPlayerList from the authoritative
+    // gameState so each new round reflects the latest alive flags
+    // (round 2+ after a Day elimination), and re-broadcast the list
+    // to joiners so their Night screens match. The round-1 entry
+    // happens from the player:ready / stub-ready handlers which
+    // already seeded nightPlayerList; this block is a no-op there
+    // (same list, same broadcast already sent) but cheap, and makes
+    // re-entry from hostStartNextNight() self-sufficient.
+    if (isHost && gameState) {
+      const publicPlayers = gameState.players.map((p) => ({
+        id: p.id,
+        name: p.name,
+        alive: p.alive,
+        isStub: !!p.isStub,
+      }));
+      nightPlayerList = publicPlayers;
+      gameState.phase = 'night';
+      channel.send({
+        type: 'broadcast',
+        event: 'phase:night-start',
+        payload: { players: publicPlayers },
+      });
+    }
+
     // Defensive: with fewer than MIN_PLAYERS there's nothing to night over.
     if (!nightPlayerList || nightPlayerList.length < GAME.MIN_PLAYERS) {
       startDayPhase({
@@ -369,7 +409,8 @@ export function startGame({
       return;
     }
 
-    // Fresh tally each Night (host only, but cheap on every client).
+    // Fresh tally each Night. Cleared on every client call but only
+    // the host actually consumes mafiaVotes — joiners never touch it.
     mafiaVotes = new Map();
 
     const localRoleId = currentRoleData && currentRoleData.role && currentRoleData.role.id;
@@ -469,6 +510,32 @@ export function startGame({
             },
           });
           nightHandle = null;
+
+          // Win check after the Night kill — if Mafia just reached
+          // parity or wiped the Guests, skip Day and go straight to
+          // game-over. Otherwise proceed to Day.
+          const nightWinner = checkWinCondition();
+          if (nightWinner) {
+            channel.send({
+              type: 'broadcast',
+              event: 'game:end',
+              payload: {
+                winner: nightWinner,
+                players: gameState.players,
+              },
+            });
+            transitionToGameOver({
+              winner: nightWinner,
+              players: gameState.players,
+              channel,
+              currentPlayer,
+              isHost,
+              app,
+              onReturnToTitle,
+            });
+            return;
+          }
+
           startDayPhase({
             channel,
             currentPlayer,
@@ -519,6 +586,12 @@ export function startGame({
       }
     }
   }
+
+  // Expose startNightPhase to module-level startVotePhase so that on
+  // Day vote resolution (no winner) the host can loop back into Night.
+  // There is only one active game session per module, same as
+  // gameState, so a single module-level ref is safe.
+  hostStartNextNight = () => startNightPhase();
 
   // Handle this player's role assignment. It arrives on their OWN private
   // channel. The shared `channel` never carries role data.
@@ -587,22 +660,10 @@ export function startGame({
     updateReadyStatus(readySet.size, totalPlayers);
 
     if (readySet.size >= totalPlayers && isHost) {
-      // Host kicks off Night. Tell every joiner to start Night locally
-      // with the same player list (names only — secrets never traverse
-      // the shared channel). Host then runs Night locally too.
-      gameState.phase = 'night';
-      const publicPlayers = gameState.players.map((p) => ({
-        id: p.id,
-        name: p.name,
-        alive: p.alive,
-        isStub: !!p.isStub,
-      }));
-      channel.send({
-        type: 'broadcast',
-        event: 'phase:night-start',
-        payload: { players: publicPlayers },
-      });
-      nightPlayerList = publicPlayers;
+      // Host kicks off Night. The broadcast of phase:night-start and
+      // the refresh of nightPlayerList happen inside startNightPhase
+      // itself so round 1 and subsequent rounds go through the same
+      // code path.
       startNightPhase();
     }
   });
@@ -650,6 +711,13 @@ export function startGame({
         nightEliminatedName: msg.payload.eliminatedName,
         onReturnToTitle,
       });
+    });
+
+    // Non-host: listen for the host's transition from Discussion → Vote.
+    // Attached once at game-start to avoid listener accumulation across
+    // rounds. Fires on every Day cycle.
+    channel.on('broadcast', { event: 'phase:day-vote' }, () => {
+      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
     });
 
     // Non-host: listen for host's end-game broadcast
@@ -735,19 +803,8 @@ export function startGame({
             readySet.add(stubId);
             updateReadyStatus(readySet.size, totalPlayers);
             if (readySet.size >= totalPlayers) {
-              gameState.phase = 'night';
-              const publicPlayers = gameState.players.map((p) => ({
-                id: p.id,
-                name: p.name,
-                alive: p.alive,
-                isStub: !!p.isStub,
-              }));
-              channel.send({
-                type: 'broadcast',
-                event: 'phase:night-start',
-                payload: { players: publicPlayers },
-              });
-              nightPlayerList = publicPlayers;
+              // Same path as real-player ready: broadcast + refresh
+              // happen inside startNightPhase.
               startNightPhase();
             }
           },
