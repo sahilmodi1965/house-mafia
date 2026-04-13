@@ -39,7 +39,9 @@ export function privateChannelName(roomCode, playerId) {
  */
 export function subscribeToPrivate(supabase, roomCode, playerId) {
   const name = privateChannelName(roomCode, playerId);
-  const ch = supabase.channel(name);
+  const ch = supabase.channel(name, {
+    config: { broadcast: { self: true } },
+  });
   ch.__bufferedRoleAssign = null;
   ch.on('broadcast', { event: 'role:assign' }, (msg) => {
     ch.__bufferedRoleAssign = msg.payload;
