@@ -1,5 +1,5 @@
 import { GAME } from './config.js';
-import { startGame } from './game.js';
+import { startGame, rebindCuratedState } from './game.js';
 import { DEV_MODE, createStubPlayer, devStorage } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 
@@ -19,6 +19,20 @@ let appEl = null;
 let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
 let gcIntervalId = null;
 let lastNonHostSeenAt = 0;
+
+// --- Reconnect grace-window state (issue #33) ---
+// Module-level because the presence handlers in subscribeToRoom need to reach
+// them across ticks, and there is only one active room per client session.
+let gamePhase = 'lobby'; // 'lobby' | 'running' — updated by markGameRunning()
+// Host-side map of seats whose owning client just left during an active game.
+// Key: clientId. Value: { player, graceTimerId, disconnectedAt }. Cleared
+// either by a matching rejoin (seat restored) or by the grace timer firing
+// (seat permanently removed).
+const disconnectedSeats = new Map();
+// Last public player-list seen by the host. Used by the grace-expiry path to
+// broadcast an updated roster so surviving clients can drop the dead seat
+// from any UI that lists players.
+let lastPublicPlayers = [];
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -181,6 +195,17 @@ function stopRoomGC() {
 function syncPlayers(state) {
   // Preserve local stub players across Supabase presence syncs
   const stubs = players.filter(p => p.isStub);
+  // Preserve seats currently inside the reconnect grace window (issue #33):
+  // they are missing from Supabase presence (the client left the channel),
+  // but the host must keep them on the roster until the grace timer fires
+  // so game.js can still reference them by id.
+  const gracedSeats = [];
+  if (isHost && gamePhase === 'running' && disconnectedSeats.size > 0) {
+    const liveKeys = new Set(Object.keys(state));
+    for (const [cid, seat] of disconnectedSeats.entries()) {
+      if (!liveKeys.has(cid)) gracedSeats.push(seat.player);
+    }
+  }
   players = [];
   for (const key of Object.keys(state)) {
     const presences = state[key];
@@ -193,7 +218,90 @@ function syncPlayers(state) {
   for (const stub of stubs) {
     players.push(stub);
   }
+  for (const graced of gracedSeats) {
+    players.push(graced);
+  }
+  // Host-only: remember the current public list so the grace-expiry path
+  // can broadcast an updated roster to surviving clients.
+  if (isHost) {
+    lastPublicPlayers = players.map((p) => ({
+      id: p.id,
+      name: p.name,
+      isHost: !!p.isHost,
+      isStub: !!p.isStub,
+    }));
+  }
   renderLobby();
+}
+
+/**
+ * Host-side: called from the presence:leave handler when a client drops
+ * during an active game. Marks the seat as disconnected on the local
+ * roster copy, stashes it in `disconnectedSeats`, and starts the grace
+ * timer that will remove the seat permanently after RECONNECT_GRACE_MS
+ * if the same clientId has not rejoined by then.
+ */
+function startReconnectGrace(clientId, leavingPlayer) {
+  // Cancel a previous timer for the same clientId if one is somehow still
+  // pending (defensive; in normal operation a rejoin clears it).
+  const prior = disconnectedSeats.get(clientId);
+  if (prior && prior.graceTimerId) clearTimeout(prior.graceTimerId);
+
+  const seatCopy = { ...leavingPlayer, disconnected: true };
+  const graceTimerId = setTimeout(() => {
+    const entry = disconnectedSeats.get(clientId);
+    if (!entry) return;
+    disconnectedSeats.delete(clientId);
+    // Permanently drop the seat from the local roster and broadcast the
+    // updated public roster so surviving clients can clean up any UI that
+    // still references the dead player.
+    if (channel) {
+      players = players.filter((p) => p.id !== clientId);
+      lastPublicPlayers = players.map((p) => ({
+        id: p.id,
+        name: p.name,
+        isHost: !!p.isHost,
+        isStub: !!p.isStub,
+      }));
+      try {
+        channel.send({
+          type: 'broadcast',
+          event: 'roster:update',
+          payload: { players: lastPublicPlayers, removedId: clientId },
+        });
+      } catch (err) {
+        console.error('reconnect grace: failed to broadcast roster:update', err);
+      }
+    }
+  }, GAME.RECONNECT_GRACE_MS);
+
+  disconnectedSeats.set(clientId, {
+    player: seatCopy,
+    graceTimerId,
+    disconnectedAt: Date.now(),
+  });
+}
+
+/**
+ * Host-side: called from the presence:join handler when a client reappears.
+ * If the joining clientId matches a seat inside the grace window, clear the
+ * timer, restore the seat to the roster, and re-deliver curated state
+ * (role + phase snapshot) on that player's private channel so the rejoined
+ * client can jump straight back into the game.
+ */
+async function restoreDisconnectedSeat(clientId) {
+  const entry = disconnectedSeats.get(clientId);
+  if (!entry) return false;
+  if (entry.graceTimerId) clearTimeout(entry.graceTimerId);
+  disconnectedSeats.delete(clientId);
+  // rebindCuratedState is imported from game.js — it is a no-op when no
+  // game is active (e.g. something weird happened and gamePhase lied).
+  try {
+    await rebindCuratedState({ supabase, roomCode, clientId });
+  } catch (err) {
+    console.error('restoreDisconnectedSeat: rebind failed', err);
+  }
+  return true;
 }
 
 // --- Create Room ---
@@ -367,6 +475,63 @@ async function subscribeToRoom(app, onBack) {
         return;
       }
 
+      // --- Reconnect recovery (issue #33) ---
+      // This check MUST come before capacity / spectator gates so a player
+      // who dropped mid-game can reclaim their seat even if the room is at
+      // MAX_PLAYERS. Detection: any presence entry in the room is marked
+      // `phase: 'running'` by the host (see markGameRunning). Spectator
+      // path for fresh joiners to a running game is tracked separately
+      // in issue #35 and is NOT wired up here.
+      let hostRunning = false;
+      for (const key of Object.keys(state)) {
+        const presences = state[key];
+        if (!presences || presences.length === 0) continue;
+        const last = presences[presences.length - 1];
+        if (last && last.phase === 'running') {
+          hostRunning = true;
+          break;
+        }
+      }
+
+      if (hostRunning) {
+        // Enter recovery mode: subscribe to private channel FIRST (so
+        // the host's rebind frames land on a live listener), wire the
+        // game loop, THEN track presence — tracking is what triggers
+        // the host's presence:join handler and the rebind send. Doing
+        // these steps in this order avoids a race where the host sends
+        // before our private channel is subscribed. No lobby screen —
+        // we are mid-game.
+        try {
+          privateChannel = await subscribeToPrivate(supabase, roomCode, currentPlayer.id);
+        } catch (err) {
+          console.error('Recovery: failed to subscribe to private channel', err);
+        }
+        // Kick the game loop so its private-channel listeners are wired
+        // up before the host's rebind frame arrives. The player list is
+        // populated later from the rebind payload.
+        startGame({
+          channel,
+          privateChannel,
+          supabase,
+          roomCode,
+          players: [],
+          currentPlayer,
+          isHost: false,
+          app: appEl,
+          onReturnToTitle: () => {
+            cleanup();
+            onBack();
+          },
+        });
+        try {
+          await channel.track(currentPlayer);
+        } catch (err) {
+          console.error('Recovery: failed to re-track presence', err);
+        }
+        resolve();
+        return;
+      }
+
       if (currentCount >= GAME.MAX_PLAYERS) {
         channel.unsubscribe();
         channel = null;
@@ -399,11 +564,50 @@ async function subscribeToRoom(app, onBack) {
             syncPlayers(state);
           }
         })
-        .on('presence', { event: 'join' }, () => {
-          // Handled by sync
+        .on('presence', { event: 'join' }, ({ key }) => {
+          // Host-only reconnect path (issue #33): if this clientId matches
+          // a seat currently inside the grace window, clear the timer and
+          // re-deliver curated state on that player's private channel.
+          // The sync handler above already re-adds them to `players`
+          // because they are now in presenceState.
+          if (isHost && gamePhase === 'running' && key && disconnectedSeats.has(key)) {
+            restoreDisconnectedSeat(key);
+          }
         })
-        .on('presence', { event: 'leave' }, () => {
-          // Handled by sync
+        .on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
+          // Reconnect grace (issue #33) — only the host arbitrates this,
+          // and only while the game is active. Lobby leaves fall through
+          // to the sync handler above and are removed immediately, which
+          // matches the issue spec ("Lobby leaves remove immediately").
+          if (!isHost || gamePhase !== 'running' || !key) return;
+          // Find the seat being vacated. The most recent presence for
+          // the key is the one the host was tracking. Fall back to the
+          // previous roster snapshot if leftPresences is missing.
+          let leavingPlayer = null;
+          if (leftPresences && leftPresences.length > 0) {
+            leavingPlayer = leftPresences[leftPresences.length - 1];
+          }
+          if (!leavingPlayer) {
+            leavingPlayer = players.find((p) => p.id === key) || null;
+          }
+          if (!leavingPlayer) return;
+          // Never grace-hold the host themself — if the host disconnects
+          // the whole room is effectively gone (authoritative state lives
+          // on their client), so we skip the stash.
+          if (leavingPlayer.id === currentPlayer?.id) return;
+          startReconnectGrace(key, leavingPlayer);
+        })
+        .on('broadcast', { event: 'roster:update' }, (msg) => {
+          // Non-host listener for host-driven grace-expiry roster updates.
+          // The host broadcasts this when a disconnected seat's grace
+          // timer expires so surviving clients can drop the dead player
+          // from any roster-based UI.
+          if (isHost) return;
+          const payload = msg.payload || {};
+          if (Array.isArray(payload.players)) {
+            players = payload.players;
+            renderLobby();
+          }
         })
         .on('broadcast', { event: 'game:start' }, () => {
           if (isHost) return; // host already triggered startGame locally
@@ -531,6 +735,10 @@ function renderLobby() {
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
       startBtn.addEventListener('click', () => {
+        // Mark the game running on the host's own presence so joiners
+        // (and the host's own leave handler) can tell we are past the
+        // lobby. See markGameRunning + issue #33.
+        markGameRunning();
         // Real (non-stub) players receive the broadcast
         const realPlayers = players.filter(p => !p.isStub);
         if (realPlayers.length > 1) {
@@ -575,10 +783,36 @@ function cleanup() {
     privateChannel.unsubscribe();
     privateChannel = null;
   }
+  // Cancel any in-flight reconnect grace timers so timers started on this
+  // client session don't fire after teardown.
+  for (const seat of disconnectedSeats.values()) {
+    if (seat.graceTimerId) clearTimeout(seat.graceTimerId);
+  }
+  disconnectedSeats.clear();
+  gamePhase = 'lobby';
+  lastPublicPlayers = [];
   currentPlayer = null;
   players = [];
   isHost = false;
   roomCode = null;
   appEl = null;
   onBackFn = null;
+}
+
+/**
+ * Called by the game loop when the host transitions from lobby → active
+ * game (issue #33). Re-tracks the host's own presence with `phase: 'running'`
+ * so joiners (and the host's own presence:leave handler) can tell that a
+ * leave event during this window is a potential reconnect candidate, not a
+ * clean lobby exit.
+ */
+export async function markGameRunning() {
+  gamePhase = 'running';
+  if (channel && currentPlayer) {
+    try {
+      await channel.track({ ...currentPlayer, phase: 'running' });
+    } catch (err) {
+      console.error('markGameRunning: failed to re-track presence', err);
+    }
+  }
 }
