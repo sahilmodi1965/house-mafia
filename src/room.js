@@ -1,6 +1,6 @@
 import { GAME } from './config.js';
 import { startGame } from './game.js';
-import { DEV_MODE, createStubPlayer } from './dev.js';
+import { DEV_MODE, createStubPlayer, devStorage } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 
 /**
@@ -88,8 +88,41 @@ async function findAvailableRoomCode(client) {
   throw new Error('Could not find an available room code after maximum attempts');
 }
 
+const CLIENT_ID_STORAGE_KEY = 'houseMafiaClientId';
+const CLIENT_ID_LENGTH = 25;
+const CLIENT_ID_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+function createRandomClientId() {
+  let id = '';
+  for (let i = 0; i < CLIENT_ID_LENGTH; i++) {
+    id += CLIENT_ID_CHARS.charAt(Math.floor(Math.random() * CLIENT_ID_CHARS.length));
+  }
+  return id;
+}
+
+/**
+ * Return a stable client identity that survives page reloads.
+ *
+ * Persisted via devStorage, which routes to localStorage in prod and
+ * sessionStorage when ?dev=1 is set (so multiple dev tabs get distinct ids).
+ * On first visit a 25-char random id is generated and saved; subsequent
+ * calls return the same id. Room membership is NOT restored here — that
+ * is tracked separately in issue #33.
+ */
 function generatePlayerId() {
-  return crypto.randomUUID();
+  try {
+    const existing = devStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    if (existing && typeof existing === 'string' && existing.length === CLIENT_ID_LENGTH) {
+      return existing;
+    }
+    const fresh = createRandomClientId();
+    devStorage.setItem(CLIENT_ID_STORAGE_KEY, fresh);
+    return fresh;
+  } catch (_err) {
+    // Storage unavailable (private mode, quota, etc.) — fall back to an
+    // ephemeral id so the current session still works.
+    return createRandomClientId();
+  }
 }
 
 // --- Presence handling ---
