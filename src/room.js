@@ -18,6 +18,13 @@ let roomCode = null;
 let appEl = null;
 let onBackFn = null; // stored so renderLobby (and game callbacks) can reach it
 
+// --- Host-side garbage collection state ---
+// Tracks the last moment at which the room had >=1 non-host occupant (real
+// presence OR local dev stub). When that moment is older than the abandon
+// threshold AND only the host is left, the host tears down the channel.
+let gcIntervalId = null;
+let lastNonHostSeenAt = 0;
+
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
   supabase = client;
@@ -90,6 +97,61 @@ async function findAvailableRoomCode(client) {
 
 function generatePlayerId() {
   return crypto.randomUUID();
+}
+
+// --- Host-side room garbage collection ---
+
+/**
+ * Count non-host occupants of the room: real Supabase presences (excluding the
+ * host's own presence key) plus any local dev stubs. Stubs live only in the
+ * `players` array and are not in presenceState, so they are counted separately.
+ */
+function countNonHostOccupants() {
+  if (!channel) return 0;
+  let realNonHost = 0;
+  try {
+    const state = channel.presenceState();
+    for (const key of Object.keys(state)) {
+      if (currentPlayer && key === currentPlayer.id) continue;
+      realNonHost += 1;
+    }
+  } catch (_err) {
+    // presenceState can throw if channel is torn down mid-tick
+    return 0;
+  }
+  const stubs = players.filter((p) => p.isStub).length;
+  return realNonHost + stubs;
+}
+
+function gcTick() {
+  if (!isHost || !channel) return;
+
+  const nonHostCount = countNonHostOccupants();
+  if (nonHostCount > 0) {
+    lastNonHostSeenAt = Date.now();
+    return;
+  }
+
+  // Only the host remains. If the gap exceeds the abandon threshold, tear down.
+  if (Date.now() - lastNonHostSeenAt >= GAME.ROOM_GC_ABANDON_THRESHOLD_MS) {
+    const back = onBackFn;
+    cleanup();
+    if (back) back();
+  }
+}
+
+function startRoomGC() {
+  if (!isHost) return;
+  stopRoomGC();
+  lastNonHostSeenAt = Date.now();
+  gcIntervalId = setInterval(gcTick, GAME.ROOM_GC_CHECK_INTERVAL_MS);
+}
+
+function stopRoomGC() {
+  if (gcIntervalId !== null) {
+    clearInterval(gcIntervalId);
+    gcIntervalId = null;
+  }
 }
 
 // --- Presence handling ---
@@ -334,6 +396,7 @@ async function subscribeToRoom(app, onBack) {
             } catch (err) {
               console.error('Failed to subscribe to private channel', err);
             }
+            startRoomGC();
             showLobby(app, onBack);
             resolve();
           } else {
@@ -448,6 +511,7 @@ function renderLobby() {
 // --- Cleanup ---
 
 function cleanup() {
+  stopRoomGC();
   if (channel) {
     channel.unsubscribe();
     channel = null;
