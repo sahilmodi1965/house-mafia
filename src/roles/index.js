@@ -2,6 +2,9 @@ import { GAME } from '../config.js';
 import mafia from './mafia.js';
 import host from './host.js';
 import guest from './guest.js';
+import detective from './detective.js';
+import doctor from './doctor.js';
+import bodyguard from './bodyguard.js';
 
 /**
  * Central role registry. Engine code should only ever touch this file — never
@@ -15,8 +18,23 @@ import guest from './guest.js';
  * Registration order matters for checkWin: each role's checkWin(state) runs
  * in ALL_ROLES order after every elimination, with a default fallback when
  * none match.
+ *
+ * Night-action contract extension (Sprint 1, #55):
+ * Every descriptor now also carries `nightActionKind`:
+ *   - 'mafia-kill'           — mafia pick a target to eliminate
+ *   - 'investigate'          — learn if target is Mafia (Host)
+ *   - 'investigate-inverted' — learn if target is Mafia, result INVERTED (Detective)
+ *   - 'save'                 — block the Mafia kill on target (Doctor)
+ *   - 'protect'              — intercept the Mafia kill, actor dies instead (Bodyguard)
+ *   - null                   — no Night action (Guest)
+ *
+ * night.js branches on this field to render the correct button list and
+ * prompt; game.js routes the resulting pick on the appropriate private
+ * channel event. The full `nightAction(ctx)` function-hook slot is still
+ * reserved for a future refactor — we only added the declarative field
+ * because the engine needed to know what UI and routing to use.
  */
-export const ALL_ROLES = [mafia, host, guest];
+export const ALL_ROLES = [mafia, host, detective, doctor, bodyguard, guest];
 
 /** Lookup table: role.id → descriptor. */
 export const rolesById = Object.fromEntries(ALL_ROLES.map((r) => [r.id, r]));
