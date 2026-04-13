@@ -245,14 +245,61 @@ async function subscribeToRoom(app, onBack) {
     },
   });
 
-  // Wait for subscribe to complete, then check presence for join validation
+  // Wait for subscribe to complete, then check presence for join validation.
+  // For joiners we must wait for the first presence:sync event before validating
+  // room existence, because Supabase Realtime may deliver presence state after
+  // the SUBSCRIBED callback fires (especially on slow networks).
   await new Promise((resolve, reject) => {
+    // Track whether the joiner validation has already settled (resolved or rejected)
+    // so that the sync handler and the timeout don't race each other.
+    let joinerSettled = false;
+
+    async function validateJoinerPresence(state) {
+      if (joinerSettled) return;
+      joinerSettled = true;
+
+      const currentCount = Object.keys(state).length;
+
+      if (currentCount === 0) {
+        // No one in the room — room doesn't exist
+        channel.unsubscribe();
+        channel = null;
+        const errorEl = document.getElementById('join-error');
+        if (errorEl) errorEl.textContent = 'Room not found. Check the code and try again.';
+        reject(new Error('Room not found'));
+        return;
+      }
+
+      if (currentCount >= GAME.MAX_PLAYERS) {
+        channel.unsubscribe();
+        channel = null;
+        const errorEl = document.getElementById('join-error');
+        if (errorEl) errorEl.textContent = `Room is full (${GAME.MAX_PLAYERS}/${GAME.MAX_PLAYERS} players).`;
+        reject(new Error('Room full'));
+        return;
+      }
+
+      // Room exists and has capacity — proceed
+      await channel.track(currentPlayer);
+      try {
+        privateChannel = await subscribeToPrivate(supabase, roomCode, currentPlayer.id);
+      } catch (err) {
+        console.error('Failed to subscribe to private channel', err);
+      }
+      showLobby(app, onBack);
+      resolve();
+    }
+
     channel
       .on('presence', { event: 'sync' }, () => {
         const state = channel.presenceState();
-        // If joining (not host), validate room exists and capacity
-        syncPlayers(state);
-        resolve();
+        if (!isHost && !joinerSettled) {
+          // Joiner: presence:sync is the authoritative moment to validate the room.
+          validateJoinerPresence(state);
+        } else {
+          // Host path, or joiner after initial validation — keep lobby in sync.
+          syncPlayers(state);
+        }
       })
       .on('presence', { event: 'join' }, () => {
         // Handled by sync
@@ -279,49 +326,23 @@ async function subscribeToRoom(app, onBack) {
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          // For joiners: peek at presence to check room existence and capacity
-          if (!isHost) {
-            const state = channel.presenceState();
-            const currentCount = Object.keys(state).length;
-
-            if (currentCount === 0) {
-              // No one in the room — room doesn't exist
-              channel.unsubscribe();
-              channel = null;
-              const errorEl = document.getElementById('join-error');
-              if (errorEl) errorEl.textContent = 'Room not found. Check the code and try again.';
-              reject(new Error('Room not found'));
-              return;
+          if (isHost) {
+            // Creator: track immediately; no presence validation needed.
+            await channel.track(currentPlayer);
+            try {
+              privateChannel = await subscribeToPrivate(supabase, roomCode, currentPlayer.id);
+            } catch (err) {
+              console.error('Failed to subscribe to private channel', err);
             }
-
-            if (currentCount >= GAME.MAX_PLAYERS) {
-              channel.unsubscribe();
-              channel = null;
-              const errorEl = document.getElementById('join-error');
-              if (errorEl) errorEl.textContent = `Room is full (${GAME.MAX_PLAYERS}/${GAME.MAX_PLAYERS} players).`;
-              reject(new Error('Room full'));
-              return;
-            }
+            showLobby(app, onBack);
+            resolve();
+          } else {
+            // Joiner: wait up to 3 s for presence:sync before falling back.
+            setTimeout(() => {
+              // If sync already fired and settled, this is a no-op.
+              validateJoinerPresence(channel.presenceState());
+            }, 3000);
           }
-
-          await channel.track(currentPlayer);
-
-          // Subscribe to THIS player's own private channel so secret
-          // payloads (role assignment, Mafia partner reveal, Host
-          // investigation results) can be delivered point-to-point
-          // instead of on the shared room channel. See src/curator.js.
-          try {
-            privateChannel = await subscribeToPrivate(
-              supabase,
-              roomCode,
-              currentPlayer.id
-            );
-          } catch (err) {
-            console.error('Failed to subscribe to private channel', err);
-          }
-
-          showLobby(app, onBack);
-          resolve();
         } else if (status === 'CHANNEL_ERROR') {
           reject(new Error('Channel error'));
         }
