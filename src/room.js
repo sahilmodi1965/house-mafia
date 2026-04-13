@@ -2,6 +2,7 @@ import { GAME } from './config.js';
 import { startGame } from './game.js';
 import { DEV_MODE, createStubPlayer } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
+import { showSpectator, inspectGamePhase } from './phases/spectator.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -102,7 +103,11 @@ function syncPlayers(state) {
     const presences = state[key];
     if (presences && presences.length > 0) {
       // Use the most recent presence for each key
-      players.push(presences[presences.length - 1]);
+      const latest = presences[presences.length - 1];
+      // Spectators are tracked on the same channel but must not be
+      // counted as players or shown in the lobby roster. See #35.
+      if (latest.isSpectator) continue;
+      players.push(latest);
     }
   }
   // Re-append stubs (they are local-only, not in Supabase presence)
@@ -157,6 +162,11 @@ export function showCreateScreen(app, onBack) {
       id: generatePlayerId(),
       name,
       isHost: true,
+      // Phase surfaced via presence so late joiners can tell, on first
+      // presence:sync, whether the game is in lobby or already running.
+      // Flipped to 'running' by markGameRunning() when the host starts
+      // the game. See #35.
+      phase: 'lobby',
     };
 
     try {
@@ -258,9 +268,8 @@ async function subscribeToRoom(app, onBack) {
       if (joinerSettled) return;
       joinerSettled = true;
 
-      const currentCount = Object.keys(state).length;
-
-      if (currentCount === 0) {
+      const keys = Object.keys(state);
+      if (keys.length === 0) {
         // No one in the room — room doesn't exist
         channel.unsubscribe();
         channel = null;
@@ -270,7 +279,71 @@ async function subscribeToRoom(app, onBack) {
         return;
       }
 
-      if (currentCount >= GAME.MAX_PLAYERS) {
+      // Split tracked presences into player vs spectator buckets so the
+      // MAX_PLAYERS / MAX_SPECTATORS caps are applied against the right
+      // populations (#35).
+      const presencePlayers = [];
+      let spectatorCount = 0;
+      for (const key of keys) {
+        const pres = state[key];
+        if (!pres || pres.length === 0) continue;
+        const latest = pres[pres.length - 1];
+        if (latest.isSpectator) {
+          spectatorCount += 1;
+        } else {
+          presencePlayers.push(latest);
+        }
+      }
+
+      // Detect mid-game state from the host's presence (phase field).
+      const { inProgress, phase } = inspectGamePhase(state);
+
+      if (inProgress) {
+        // Late joiner → spectator path. Cap at MAX_SPECTATORS. Players
+        // already tracked on the shared channel stay players; this
+        // branch never modifies the player roster.
+        if (spectatorCount >= GAME.MAX_SPECTATORS) {
+          channel.unsubscribe();
+          channel = null;
+          const errorEl = document.getElementById('join-error');
+          if (errorEl) errorEl.textContent = `Game is full (spectators at capacity, ${GAME.MAX_SPECTATORS}/${GAME.MAX_SPECTATORS}).`;
+          reject(new Error('Spectators at capacity'));
+          return;
+        }
+
+        // Track as a spectator so the host + other clients know not
+        // to count this presence toward the player cap or the vote
+        // tally. We do NOT subscribe to a private channel — spectators
+        // receive nothing that requires a private channel.
+        const spectatorPresence = {
+          id: currentPlayer.id,
+          name: currentPlayer.name,
+          isHost: false,
+          isSpectator: true,
+        };
+        currentPlayer = spectatorPresence;
+        await channel.track(spectatorPresence);
+
+        showSpectator({
+          app,
+          channel,
+          roomCode,
+          initialPlayers: presencePlayers.map((p) => ({
+            id: p.id,
+            name: p.name,
+            alive: true,
+          })),
+          initialPhase: phase,
+          onLeave: () => {
+            cleanup();
+            onBack();
+          },
+        });
+        resolve();
+        return;
+      }
+
+      if (presencePlayers.length >= GAME.MAX_PLAYERS) {
         channel.unsubscribe();
         channel = null;
         const errorEl = document.getElementById('join-error');
@@ -279,7 +352,7 @@ async function subscribeToRoom(app, onBack) {
         return;
       }
 
-      // Room exists and has capacity — proceed
+      // Room exists, still in lobby, has capacity — proceed as player.
       await channel.track(currentPlayer);
       try {
         privateChannel = await subscribeToPrivate(supabase, roomCode, currentPlayer.id);
@@ -309,6 +382,7 @@ async function subscribeToRoom(app, onBack) {
       })
       .on('broadcast', { event: 'game:start' }, () => {
         if (isHost) return; // host already triggered startGame locally
+        if (currentPlayer && currentPlayer.isSpectator) return; // spectators never enter the game loop (#35)
         startGame({
           channel,
           privateChannel,
@@ -413,6 +487,14 @@ function renderLobby() {
     const startBtn = document.getElementById('btn-start-game');
     if (startBtn && canStart) {
       startBtn.addEventListener('click', () => {
+        // Flip the host's presence phase BEFORE broadcasting game:start
+        // so any racing late joiner sees the running phase and routes
+        // to the spectator view. See #35.
+        currentPlayer = { ...currentPlayer, phase: 'running' };
+        channel.track(currentPlayer).catch((err) => {
+          console.error('Failed to update host presence phase', err);
+        });
+
         // Real (non-stub) players receive the broadcast
         const realPlayers = players.filter(p => !p.isStub);
         if (realPlayers.length > 1) {
