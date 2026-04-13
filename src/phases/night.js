@@ -54,7 +54,18 @@ export function showNightPhase({
   let selectedTarget = null;
   let selectedInvestigation = null;
   let investigationResult = null; // 'mafia' | 'not-mafia'
+  let investigationResultShownAt = 0; // ms timestamp, 0 = not yet shown
   let ended = false;
+  // Issue #95: the Host role's investigate result can arrive within the
+  // final second of the Night timer. Without a grace window, endNight()
+  // fires immediately and the Host never sees the "X is Mafia" text
+  // before the day-discuss screen replaces it. We hold the local
+  // transition for up to HOST_INVESTIGATE_GRACE_MS after the result
+  // is first painted. The Mafia kill broadcast from the game host is
+  // unaffected — it runs on the game host's authoritative timer, and
+  // this grace is local-only to the investigator's client.
+  const HOST_INVESTIGATE_GRACE_MS = 3000;
+  let graceTimeout = null;
 
   const headerText =
     roleId === 'mafia'
@@ -106,10 +117,23 @@ export function showNightPhase({
 
   // Timer — each client runs its own local 30s countdown. Host's
   // subsequent phase:day-discuss broadcast is what re-syncs everyone.
+  //
+  // Issue #95: for the Host role specifically, when the timer fires
+  // and we have an investigation result that was shown <3s ago, we
+  // delay endNight() by the remaining grace so the investigator can
+  // actually read the result. Other roles call endNight() immediately.
   const timer = createTimer(
     GAME.NIGHT_DURATION,
     null,
     () => {
+      if (roleId === 'host' && investigationResultShownAt > 0) {
+        const elapsed = Date.now() - investigationResultShownAt;
+        const remaining = HOST_INVESTIGATE_GRACE_MS - elapsed;
+        if (remaining > 0) {
+          graceTimeout = setTimeout(() => endNight(), remaining);
+          return;
+        }
+      }
       endNight();
     }
   );
@@ -125,6 +149,10 @@ export function showNightPhase({
     if (ended) return;
     ended = true;
     timer.stop();
+    if (graceTimeout) {
+      clearTimeout(graceTimeout);
+      graceTimeout = null;
+    }
     if (onNightEnd) {
       onNightEnd({
         localPick: selectedTarget,
@@ -171,9 +199,23 @@ export function showNightPhase({
   function showInvestigationResult(result, targetName) {
     if (ended || roleId !== 'host') return;
     investigationResult = result;
+    investigationResultShownAt = Date.now();
     const label = result === 'mafia' ? 'Mafia' : 'Not Mafia';
     updateStatus(`${targetName} is ${label}.`);
   }
 
-  return { showInvestigationResult };
+  /**
+   * Issue #95: game.js reads this when it receives phase:day-discuss
+   * on a non-host Host-role client so the day transition can be held
+   * for the same 3s grace window night.js uses for its own timer.
+   */
+  function getInvestigationShownAt() {
+    return investigationResultShownAt;
+  }
+
+  return {
+    showInvestigationResult,
+    getInvestigationShownAt,
+    HOST_INVESTIGATE_GRACE_MS,
+  };
 }

@@ -704,14 +704,37 @@ export function startGame({
           roles: {},
         };
       }
-      startDayPhase({
-        channel,
-        currentPlayer,
-        isHost,
-        app,
-        nightEliminatedName: msg.payload.eliminatedName,
-        onReturnToTitle,
-      });
+
+      const doTransition = () => {
+        startDayPhase({
+          channel,
+          currentPlayer,
+          isHost,
+          app,
+          nightEliminatedName: msg.payload.eliminatedName,
+          onReturnToTitle,
+        });
+      };
+
+      // Issue #95: if we're a non-host Host-role client and an
+      // investigation result was just painted (within the night.js
+      // grace window), hold the day transition so the investigator
+      // can read it before the screen swaps.
+      if (
+        nightHandle &&
+        typeof nightHandle.getInvestigationShownAt === 'function'
+      ) {
+        const shownAt = nightHandle.getInvestigationShownAt();
+        const grace = nightHandle.HOST_INVESTIGATE_GRACE_MS || 3000;
+        if (shownAt > 0) {
+          const remaining = grace - (Date.now() - shownAt);
+          if (remaining > 0) {
+            setTimeout(doTransition, remaining);
+            return;
+          }
+        }
+      }
+      doTransition();
     });
 
     // Non-host: listen for the host's transition from Discussion → Vote.
