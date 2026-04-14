@@ -1,5 +1,6 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
+import { shouldDelayEndNight } from '../engine/resolve.js';
 
 /**
  * Night phase — mafia kill + host investigate (issues #26 + #27).
@@ -144,16 +145,15 @@ export function showNightPhase({
     GAME.NIGHT_DURATION,
     null,
     () => {
-      if (
-        (nightActionKind === 'investigate' || nightActionKind === 'investigate-inverted') &&
-        investigationResultShownAt > 0
-      ) {
-        const elapsed = Date.now() - investigationResultShownAt;
-        const remaining = HOST_INVESTIGATE_GRACE_MS - elapsed;
-        if (remaining > 0) {
-          graceTimeout = setTimeout(() => endNight(), remaining);
-          return;
-        }
+      const { delay, waitMs } = shouldDelayEndNight({
+        nightActionKind,
+        investigationResultShownAt,
+        nowMs: Date.now(),
+        graceMs: HOST_INVESTIGATE_GRACE_MS,
+      });
+      if (delay) {
+        graceTimeout = setTimeout(() => endNight(), waitMs);
+        return;
       }
       endNight();
     }

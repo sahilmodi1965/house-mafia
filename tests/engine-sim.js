@@ -31,6 +31,7 @@ import {
   resolveMafiaKill,
   resolveNightKill,
   checkWinCondition,
+  shouldDelayEndNight,
 } from '../src/engine/resolve.js';
 
 // ---------------------------------------------------------------- harness
@@ -320,6 +321,72 @@ section('4. checkWinCondition');
     { alive: true, role: rolesById.host },
   ];
   assertEq(checkWinCondition(players), 'mafia', '2m 2t → mafia wins (>=)');
+}
+
+// ---------------------------------------------------------------- 4b. #95 grace-window decision
+
+section('4b. shouldDelayEndNight — #95 grace-window decision (pure)');
+
+const GRACE = 3000;
+
+// Non-investigator → never delay, regardless of shownAt.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'mafia-kill', investigationResultShownAt: 5000, nowMs: 6000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'mafia-kill never delays (even with shownAt set)');
+}
+{
+  const r = shouldDelayEndNight({ nightActionKind: null, investigationResultShownAt: 5000, nowMs: 6000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'null kind never delays');
+}
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'save', investigationResultShownAt: 5000, nowMs: 6000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'save kind never delays');
+}
+
+// Investigator with no result shown → never delay.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 0, nowMs: 30000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'investigate with no result → fire now');
+}
+
+// Investigator with result shown > 3s ago → never delay (grace already elapsed).
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 5000, nowMs: 10000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'investigate with 5s elapsed → fire now (grace exhausted)');
+}
+
+// Investigator with result shown exactly 3s ago → boundary, no delay.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 5000, nowMs: 8000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'investigate at exact grace boundary → fire now');
+}
+
+// Investigator with result shown < 3s ago → delay for remaining grace.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 5000, nowMs: 5100, graceMs: GRACE });
+  assertEq(r, { delay: true, waitMs: 2900 }, 'investigate at 100ms elapsed → delay 2900ms');
+}
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 5000, nowMs: 7000, graceMs: GRACE });
+  assertEq(r, { delay: true, waitMs: 1000 }, 'investigate at 2s elapsed → delay 1000ms');
+}
+
+// Detective (investigate-inverted) also gets the grace window.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate-inverted', investigationResultShownAt: 5000, nowMs: 5500, graceMs: GRACE });
+  assertEq(r, { delay: true, waitMs: 2500 }, 'detective (inverted) at 500ms elapsed → delay 2500ms');
+}
+
+// Clock-skew defence: nowMs < shownAt (clock went backward) → never delay.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 5000, nowMs: 4000, graceMs: GRACE });
+  assertEq(r, { delay: false, waitMs: 0 }, 'clock skew (now < shownAt) fail-safe → fire now');
+}
+
+// Custom graceMs → scales accordingly.
+{
+  const r = shouldDelayEndNight({ nightActionKind: 'investigate', investigationResultShownAt: 5000, nowMs: 5500, graceMs: 1000 });
+  assertEq(r, { delay: true, waitMs: 500 }, 'custom grace=1000ms @ 500ms elapsed → delay 500ms');
 }
 
 // ---------------------------------------------------------------- 5. full-game sims

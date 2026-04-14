@@ -94,6 +94,36 @@ export function resolveNightKill({ killedId, nightSaves, nightProtects, players 
 }
 
 /**
+ * Issue #95 grace-window decision for the Host/Detective investigator.
+ *
+ * When the Night timer fires, the investigator's result may have been
+ * painted to the screen only a fraction of a second ago. This helper
+ * decides whether to fire `endNight()` immediately or defer it by
+ * `graceMs - elapsed` so the investigator can actually read the result.
+ *
+ * Pure: no DOM, no setTimeout, no Date.now(). The caller supplies `nowMs`.
+ *
+ * @param {Object} opts
+ * @param {string|null|undefined} opts.nightActionKind - role.nightActionKind
+ * @param {number} opts.investigationResultShownAt - ms timestamp when result was painted (0 = never)
+ * @param {number} opts.nowMs - current wall clock in ms
+ * @param {number} opts.graceMs - total grace window in ms (e.g. 3000)
+ * @returns {{ delay: boolean, waitMs: number }} — delay=false means fire now;
+ *          delay=true means schedule endNight() in waitMs milliseconds.
+ */
+export function shouldDelayEndNight({ nightActionKind, investigationResultShownAt, nowMs, graceMs }) {
+  const isInvestigator =
+    nightActionKind === 'investigate' || nightActionKind === 'investigate-inverted';
+  if (!isInvestigator) return { delay: false, waitMs: 0 };
+  if (!investigationResultShownAt || investigationResultShownAt <= 0) return { delay: false, waitMs: 0 };
+  const elapsed = nowMs - investigationResultShownAt;
+  if (elapsed < 0) return { delay: false, waitMs: 0 }; // clock went backwards — fail safe
+  const remaining = graceMs - elapsed;
+  if (remaining <= 0) return { delay: false, waitMs: 0 };
+  return { delay: true, waitMs: remaining };
+}
+
+/**
  * Evaluate win conditions from the current player snapshot.
  *   - 'guests' if no living Mafia
  *   - 'mafia'  if living Mafia count >= living non-Mafia count

@@ -11,6 +11,7 @@ import {
   resolveMafiaKill as pureResolveMafiaKill,
   resolveNightKill,
   checkWinCondition as pureCheckWinCondition,
+  shouldDelayEndNight,
 } from './engine/resolve.js';
 
 /**
@@ -793,18 +794,17 @@ export function startGame({
       // investigation result was just painted (within the night.js
       // grace window), hold the day transition so the investigator
       // can read it before the screen swaps.
-      if (
-        nightHandle &&
-        typeof nightHandle.getInvestigationShownAt === 'function'
-      ) {
+      if (nightHandle && typeof nightHandle.getInvestigationShownAt === 'function') {
         const shownAt = nightHandle.getInvestigationShownAt();
-        const grace = nightHandle.HOST_INVESTIGATE_GRACE_MS || 3000;
-        if (shownAt > 0) {
-          const remaining = grace - (Date.now() - shownAt);
-          if (remaining > 0) {
-            setTimeout(doTransition, remaining);
-            return;
-          }
+        const { delay, waitMs } = shouldDelayEndNight({
+          nightActionKind: 'investigate', // shownAt > 0 only for investigators
+          investigationResultShownAt: shownAt,
+          nowMs: Date.now(),
+          graceMs: nightHandle.HOST_INVESTIGATE_GRACE_MS || 3000,
+        });
+        if (delay) {
+          setTimeout(doTransition, waitMs);
+          return;
         }
       }
       doTransition();
