@@ -1,0 +1,45 @@
+/*
+ * Role-reveal animation tunables. Issue #53.
+ *
+ * Every visual knob for the eliminated-player role-reveal lives in
+ * this file. Polish PRs tune the feel by editing the values below
+ * — never by modifying vote.js or game.js. This is the Stratos
+ * Games Factory CSS-tunables convention.
+ */
+
+:root {
+  --role-reveal-duration: 1500ms;
+  --role-reveal-delay: 100ms;
+  --role-reveal-ease: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --role-reveal-scale-start: 0;
+  --role-reveal-scale-peak: 1.1;
+  --role-reveal-scale-end: 1;
+  --role-reveal-glow: 0 0 24px;
+}
+
+@keyframes role-reveal-pop {
+  0% {
+    transform: scale(var(--role-reveal-scale-start));
+    opacity: 0;
+  }
+  60% {
+    transform: scale(var(--role-reveal-scale-peak));
+    opacity: 1;
+  }
+  100% {
+    transform: scale(var(--role-reveal-scale-end));
+    opacity: 1;
+  }
+}
+
+.role-reveal-animate {
+  display: inline-block;
+  transform-origin: center;
+  animation: role-reveal-pop var(--role-reveal-duration) var(--role-reveal-ease) var(--role-reveal-delay) both;
+}
+
+.role-reveal-badge {
+  display: inline-block;
+  font-weight: 700;
+  text-shadow: var(--role-reveal-glow) var(--reveal-color, #fff);
+}

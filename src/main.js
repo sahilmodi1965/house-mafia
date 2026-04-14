@@ -2,6 +2,9 @@ import { createClient } from '@supabase/supabase-js';
 import { setSupabase, showCreateScreen, showJoinScreen } from './room.js';
 import { DEV_MODE } from './dev.js';
 import { startPassAndPlay } from './pass-and-play.js';
+// #53: role-reveal animation tunables. Import via JS so Vite bundles
+// the CSS into docs/assets — no index.html edit needed.
+import './styles/role-reveal-tunables.css';
 
 // --- Supabase singleton ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;

@@ -113,13 +113,23 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
       try {
         showToast(`${eliminatedPlayer.name} was eliminated`, { type: 'warn', duration: 3000 });
       } catch (_) {}
+      // #53: animated role reveal — every player (alive or eliminated)
+      // sees the big role badge pop in via the CSS keyframe in
+      // src/styles/role-reveal-tunables.css. The span inherits the
+      // role color via the --reveal-color CSS variable.
       app.innerHTML = `
         <div id="screen-day-result" class="screen active">
           <h1>Eliminated</h1>
           <p class="vote-result-name">${eliminatedPlayer.name}</p>
-          <p class="vote-result-role">Role: <span style="color: ${eliminatedPlayer.role.color}">${eliminatedPlayer.role.emoji} ${eliminatedPlayer.role.name}</span></p>
+          <p class="vote-result-role">Role:
+            <span class="role-reveal-animate role-reveal-badge"
+                  style="--reveal-color: ${eliminatedPlayer.role.color}; color: ${eliminatedPlayer.role.color}">
+              ${eliminatedPlayer.role.emoji} ${eliminatedPlayer.role.name}
+            </span>
+          </p>
         </div>
       `;
+      try { playSound('role-reveal'); } catch (_) {}
     } else {
       app.innerHTML = `
         <div id="screen-day-result" class="screen active">
