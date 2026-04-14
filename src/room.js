@@ -730,15 +730,35 @@ async function subscribeToRoom(app, onBack) {
           // window. If they come back via the 'join' handler above,
           // the timer is cleared and the seat is restored.
           if (!key) return;
-          // Ignore leave events for our OWN presence key. Supabase
-          // fires a leave any time a client re-calls channel.track()
-          // (which we do on game start, settings save, and host
-          // promotion). Our own client never "leaves" from its own
-          // perspective — any leave for our id is a retrack artifact
-          // and must not trigger the disconnect grace window (that
-          // would otherwise evict ourselves 30s later and, if we are
-          // the host, run selectNextHost → null → onHostGone →
-          // return-to-title mid-game).
+          // #115 #113 #114: when ANY client re-calls channel.track()
+          // (which house-mafia does on game start, settings save,
+          // spectator join, host promotion, and Play Again), Supabase
+          // fires presence:join for the NEW presence followed by
+          // presence:leave for the OLD presence — both carrying the
+          // same `key`. For the retrack's own client the self-filter
+          // below catches it, but for OTHER clients we still saw the
+          // leave and started a disconnect eviction timer that nothing
+          // cleared (the join already fired, in the past). 30s later
+          // the real host got evicted → host migration → two peers
+          // elected different successors → phase:day-discuss loop on
+          // the promoted clients → vote-mount stampede and audio
+          // recursion. Fix: if the key is STILL present in the current
+          // presence state, this is a retrack artifact — ignore the
+          // leave. A real disconnect removes the key from the state
+          // snapshot first, so the retrack check is strictly narrower
+          // than the existing grace-window behaviour.
+          try {
+            const state = channel && typeof channel.presenceState === 'function'
+              ? channel.presenceState()
+              : null;
+            if (state && Array.isArray(state[key]) && state[key].length > 0) {
+              // Retrack artifact — the same key is still in presence.
+              return;
+            }
+          } catch (_) {
+            // If presenceState throws, fall through to the original
+            // eviction path so a real disconnect is still caught.
+          }
           if (currentPlayer && key === currentPlayer.id) return;
           const leaving = players.find((p) => p.id === key);
           if (!leaving) return;
