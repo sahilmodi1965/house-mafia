@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>House Mafia</title>
+  <script type="module" crossorigin src="/house-mafia/pr/117/assets/index-D2m41k3G.js"></script>
+  <link rel="stylesheet" crossorigin href="/house-mafia/pr/117/assets/index-OSVa-2Qx.css">
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- Role reveal screen template (populated dynamically by src/ui/screens.js) -->
+  <template id="tmpl-role-reveal">
+    <div id="screen-role-reveal" class="screen active">
+      <h1>Your Role</h1>
+      <div class="role-card" id="role-card">
+        <div class="role-card__inner" id="role-card-inner">
+          <div class="role-card__front">
+            <span class="role-card__question">?</span>
+          </div>
+          <div class="role-card__back">
+            <span class="role-card__emoji"></span>
+            <span class="role-card__name"></span>
+          </div>
+        </div>
+      </div>
+      <p class="role-description" id="role-description"></p>
+      <button class="btn btn--pink" id="btn-ready">Ready</button>
+      <p class="ready-status" id="ready-status"></p>
+    </div>
+  </template>
+
+  <!-- Day discussion screen template -->
+  <template id="tmpl-day-discuss">
+    <div id="screen-day-discuss" class="screen">
+      <h1>Day -- Discuss!</h1>
+      <p class="day-announcement" id="day-announcement"></p>
+      <div id="day-timer-container"></div>
+      <ul class="day-player-list" id="day-player-list"></ul>
+      <div class="day-chat" id="day-chat">
+        <div class="day-chat__messages" id="day-chat-messages"></div>
+        <div class="day-chat__input-row">
+          <input type="text" class="input day-chat__input" id="day-chat-input" placeholder="Type a message..." maxlength="120" autocomplete="off" />
+          <button class="btn btn--cyan day-chat__send" id="day-chat-send">Send</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Voting screen template -->
+  <template id="tmpl-day-vote">
+    <div id="screen-day-vote" class="screen">
+      <h1>Vote to Eliminate</h1>
+      <div id="vote-timer-container"></div>
+      <div class="vote-buttons" id="vote-buttons"></div>
+      <p class="vote-status" id="vote-status"></p>
+    </div>
+  </template>
+
+</body>
+</html>
