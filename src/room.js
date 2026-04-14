@@ -9,7 +9,7 @@ import {
   applyRoomConfig,
 } from './ui/settings-modal.js';
 import { showToast } from './ui/toast.js';
-import { isNameAvailable } from './engine/resolve.js';
+import { isNameAvailable, playAgainResetPlayers } from './engine/resolve.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -945,13 +945,9 @@ function renderSharePanel(panelEl, url) {
  */
 function restartRoomInPlace() {
   if (!appEl) return;
-  // Strip transient game state from every player. We reset alive/role/
-  // votedFor fields but keep id/name/isHost/isStub intact. Stubs remain
-  // present — the host can remove them via the lobby controls if needed.
-  players = players.map((p) => {
-    const { role, alive, votedFor, ...rest } = p;
-    return rest;
-  });
+  // Strip transient game state from every player via the pure helper.
+  // Preserves id/name/isHost/isStub; drops alive/role/votedFor.
+  players = playAgainResetPlayers(players);
 
   if (isHost && currentPlayer) {
     currentPlayer = { ...currentPlayer, phase: 'lobby' };
