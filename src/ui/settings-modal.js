@@ -204,22 +204,47 @@ export function openSettingsModal({ currentConfig, playerCount, onSave, onCancel
 
   document.body.appendChild(overlay);
 
-  function readDraftFromDOM() {
-    const get = (name) => {
-      const el = overlay.querySelector(`input[name="${name}"]:checked`);
-      return el ? Number(el.value) : null;
-    };
-    draft.nightDuration = get('nightDuration') ?? draft.nightDuration;
-    draft.discussionDuration = get('discussionDuration') ?? draft.discussionDuration;
-    draft.voteDuration = get('voteDuration') ?? draft.voteDuration;
-    const presetSel = overlay.querySelector('#settings-preset');
-    if (presetSel) draft.preset = presetSel.value;
-    const disabled = new Set();
-    overlay.querySelectorAll('input[type="checkbox"][data-role-id]').forEach((cb) => {
-      if (!cb.checked && !cb.disabled) disabled.add(cb.dataset.roleId);
-    });
-    draft.disabledRoles = disabled;
-  }
+  // #101: Delegated change listener. Every radio / checkbox / select
+  // change inside the overlay immediately propagates into `draft`, so
+  // the Save handler just reads what's already there. This is the
+  // single source of truth for "what did the host pick?" — no more
+  // reading from DOM on save (which was fragile when selectors changed).
+  const TIMER_FIELDS = new Set([
+    'nightDuration',
+    'discussionDuration',
+    'voteDuration',
+  ]);
+  overlay.addEventListener('change', (e) => {
+    const el = /** @type {HTMLInputElement | HTMLSelectElement} */ (e.target);
+    if (!el) return;
+    if (el.tagName === 'INPUT' && /** @type {HTMLInputElement} */ (el).type === 'radio') {
+      const name = /** @type {HTMLInputElement} */ (el).name;
+      if (TIMER_FIELDS.has(name)) {
+        draft[name] = Number(/** @type {HTMLInputElement} */ (el).value);
+      }
+      return;
+    }
+    if (
+      el.tagName === 'INPUT' &&
+      /** @type {HTMLInputElement} */ (el).type === 'checkbox' &&
+      /** @type {HTMLInputElement} */ (el).dataset.roleId
+    ) {
+      const cb = /** @type {HTMLInputElement} */ (el);
+      // Core roles render as disabled — their change events should never
+      // fire, but if they do we ignore them so they can't be toggled off.
+      if (cb.disabled) return;
+      const id = cb.dataset.roleId;
+      if (cb.checked) {
+        draft.disabledRoles.delete(id);
+      } else {
+        draft.disabledRoles.add(id);
+      }
+      return;
+    }
+    if (el.tagName === 'SELECT' && el.id === 'settings-preset') {
+      draft.preset = /** @type {HTMLSelectElement} */ (el).value;
+    }
+  });
 
   function close() {
     overlay.remove();
@@ -231,7 +256,6 @@ export function openSettingsModal({ currentConfig, playerCount, onSave, onCancel
   });
 
   overlay.querySelector('#settings-save').addEventListener('click', () => {
-    readDraftFromDOM();
     close();
     if (onSave) {
       onSave({
