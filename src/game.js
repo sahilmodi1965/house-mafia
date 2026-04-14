@@ -4,7 +4,7 @@ import { showRoleReveal, updateReadyStatus } from './ui/screens.js';
 import { showNightPhase } from './phases/night.js';
 import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
-import { DEV_MODE, scheduleStubAction } from './dev.js';
+import { DEV_MODE, scheduleStubAction, scheduleStubChatter } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 import { showGameOver } from './ui/game-over.js';
 import {
@@ -51,7 +51,13 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
     });
   }
 
-  showDayDiscussion({
+  // #102: track stub-chatter timer handles so we can cancel them if
+  // Discussion ends early (host advances) or the stub is eliminated
+  // mid-phase. Reset on every entry to this phase.
+  const chatterTimers = [];
+  let discussionEnded = false;
+
+  const dayHandle = showDayDiscussion({
     app,
     channel,
     players: gameState.players,
@@ -63,11 +69,46 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
       // discussion ends. The non-host transition to voting is driven
       // by the host's phase:day-vote broadcast, which is handled by a
       // one-time listener attached at game-start in startGame().
+      discussionEnded = true;
+      for (const h of chatterTimers) clearTimeout(h);
+      chatterTimers.length = 0;
       if (isHost) {
         startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
       }
     },
   });
+
+  // #102: dev-mode stub chatter. Only the host (which owns stubs) ever
+  // schedules these. Each living stub emits 1-2 lines staggered across
+  // the Discussion phase so the strip reads naturally instead of
+  // stampeding. Purely local: never touches Supabase, never appears
+  // in real multiplayer sessions.
+  if (isHost && DEV_MODE && gameState && dayHandle && dayHandle.appendChatter) {
+    const livingStubs = gameState.players.filter((p) => p.isStub && p.alive !== false);
+    const windowMs = Math.max(2000, (GAME.DISCUSSION_DURATION - 2) * 1000);
+    for (const stub of livingStubs) {
+      const lineCount = 1 + Math.floor(Math.random() * 2); // 1 or 2 lines
+      for (let i = 0; i < lineCount; i++) {
+        const delay = 1200 + Math.random() * windowMs;
+        const handle = scheduleStubChatter({
+          stubId: stub.id,
+          stubName: stub.name,
+          stubRole: stub.role?.id,
+          allPlayers: gameState.players,
+          onChat: ({ text }) => {
+            // Bail if discussion ended before we fired, or if the stub
+            // has since been eliminated (e.g., Day-before-this cycle).
+            if (discussionEnded) return;
+            const live = gameState?.players.find((p) => p.id === stub.id);
+            if (!live || live.alive === false) return;
+            dayHandle.appendChatter(text);
+          },
+          delayMs: delay,
+        });
+        if (handle) chatterTimers.push(handle);
+      }
+    }
+  }
 }
 
 /**
