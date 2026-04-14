@@ -560,6 +560,21 @@ async function subscribeToRoom(app, onBack) {
             try {
               showToast('You were removed from the room', { type: 'error', duration: 4000 });
             } catch (_) {}
+            // #109: strip ?room= from the URL so the main.js auto-join
+            // logic can't immediately bounce the kicked client back into
+            // the Join screen with the room code pre-filled. Also set a
+            // session flag as a defensive guard in case history.replaceState
+            // is delayed or unavailable.
+            try {
+              if (typeof sessionStorage !== 'undefined') {
+                sessionStorage.setItem('hm:just-kicked', '1');
+              }
+            } catch (_) {}
+            try {
+              if (typeof history !== 'undefined' && history.replaceState) {
+                history.replaceState({}, '', window.location.pathname);
+              }
+            } catch (_) {}
             const back = onBackFn;
             cleanup();
             if (back) back();
