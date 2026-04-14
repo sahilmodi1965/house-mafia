@@ -25,6 +25,12 @@ import { createChatWidget } from '../ui/chat.js';
  * @param {Function} opts.onDiscussionEnd - Called when discussion timer ends
  */
 export function showDayDiscussion({ app, channel, players, currentPlayer, isHost, eliminatedName, onDiscussionEnd }) {
+  // #113: mount-counter debug hook for the hardened multi-client harness.
+  try {
+    if (typeof window !== 'undefined' && window.__hm_debug__) {
+      window.__hm_debug__.dayMounts = (window.__hm_debug__.dayMounts || 0) + 1;
+    }
+  } catch (_) {}
   const isAlive = players.find(p => p.id === currentPlayer.id)?.alive !== false;
 
   // Suspect tally — reset fresh each round

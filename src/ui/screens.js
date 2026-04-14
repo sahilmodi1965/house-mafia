@@ -15,6 +15,12 @@ import { haptic, HAPTIC_TAP } from '../haptic.js';
  * @param {Function} onReady - Called when the player taps Ready
  */
 export function showRoleReveal(app, roleData, playerName, onReady) {
+  // #115: mount-counter debug hook for the hardened multi-client harness.
+  try {
+    if (typeof window !== 'undefined' && window.__hm_debug__) {
+      window.__hm_debug__.roleMounts = (window.__hm_debug__.roleMounts || 0) + 1;
+    }
+  } catch (_) {}
   const { role, mafiaPartners } = roleData;
 
   let description = '';
