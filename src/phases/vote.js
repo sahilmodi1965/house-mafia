@@ -1,6 +1,9 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
 import { DEV_MODE, scheduleStubAction } from '../dev.js';
+import { playSound } from '../audio.js';
+import { haptic, HAPTIC_VOTE } from '../haptic.js';
+import { showToast } from '../ui/toast.js';
 
 /**
  * Voting phase.
@@ -102,13 +105,31 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
 
   function showResult(eliminatedPlayer) {
     if (eliminatedPlayer) {
+      // #57 #58 #53: vote-elimination feedback — single path runs on
+      // host and non-host, so this fires exactly once per client per
+      // round.
+      try { playSound('elimination'); } catch (_) {}
+      try { haptic([60, 40, 60]); } catch (_) {}
+      try {
+        showToast(`${eliminatedPlayer.name} was eliminated`, { type: 'warn', duration: 3000 });
+      } catch (_) {}
+      // #53: animated role reveal — every player (alive or eliminated)
+      // sees the big role badge pop in via the CSS keyframe in
+      // src/styles/role-reveal-tunables.css. The span inherits the
+      // role color via the --reveal-color CSS variable.
       app.innerHTML = `
         <div id="screen-day-result" class="screen active">
           <h1>Eliminated</h1>
           <p class="vote-result-name">${eliminatedPlayer.name}</p>
-          <p class="vote-result-role">Role: <span style="color: ${eliminatedPlayer.role.color}">${eliminatedPlayer.role.emoji} ${eliminatedPlayer.role.name}</span></p>
+          <p class="vote-result-role">Role:
+            <span class="role-reveal-animate role-reveal-badge"
+                  style="--reveal-color: ${eliminatedPlayer.role.color}; color: ${eliminatedPlayer.role.color}">
+              ${eliminatedPlayer.role.emoji} ${eliminatedPlayer.role.name}
+            </span>
+          </p>
         </div>
       `;
+      try { playSound('role-reveal'); } catch (_) {}
     } else {
       app.innerHTML = `
         <div id="screen-day-result" class="screen active">
@@ -148,7 +169,7 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
       setTimeout(() => {
         if (onVoteResult) onVoteResult(result);
       }, 3000);
-    });
+    }, { fireWarnings: false });
     hostTimer.start();
 
     // In dev mode, auto-cast votes for stub players
@@ -264,6 +285,11 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
 
       hasVoted = true;
       const targetId = btn.dataset.playerId;
+
+      // #57 #58: gameplay feedback for the local voter.
+      try { playSound('vote'); } catch (_) {}
+      try { haptic(HAPTIC_VOTE); } catch (_) {}
+      try { showToast('Vote locked in', { type: 'info', duration: 1500 }); } catch (_) {}
 
       // Highlight selected
       btn.classList.add('vote-btn--selected');

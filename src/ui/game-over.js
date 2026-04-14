@@ -15,6 +15,10 @@
  * isHost:     boolean — controls Play Again button behaviour.
  */
 
+import { playSound } from '../audio.js';
+import { haptic, HAPTIC_ELIMINATE } from '../haptic.js';
+import { showToast } from './toast.js';
+
 const ROLE_ORDER = { mafia: 0, host: 1, guest: 2 };
 
 /**
@@ -67,9 +71,14 @@ export function showGameOver(container, { winner, players, onPlayAgain, onLeave,
     })
     .join('');
 
-  const playAgainSection = isHost
-    ? `<button class="btn btn--pink" id="btn-play-again">Play Again</button>`
-    : `<p class="waiting-text" id="waiting-play-again">Waiting for host to restart…</p>`;
+  // #47: both host and non-host see a Play Again button. Non-host
+  // clicks show a toast explaining only the host can restart; they do
+  // NOT broadcast anything. This keeps the party-pressure UX where any
+  // player can poke the host.
+  const playAgainSection = `<button class="btn btn--pink" id="btn-play-again">Play Again</button>
+    <p class="waiting-text" id="waiting-play-again" style="${isHost ? 'display:none' : ''}">
+      Waiting for host to restart…
+    </p>`;
 
   container.innerHTML = `
     <div id="screen-game-over" class="screen active">
@@ -85,9 +94,20 @@ export function showGameOver(container, { winner, players, onPlayAgain, onLeave,
     </div>
   `;
 
-  if (isHost) {
-    document.getElementById('btn-play-again').addEventListener('click', () => {
-      if (onPlayAgain) onPlayAgain();
+  // #57 #58: game-over feedback — fires once on mount, on every client.
+  try { playSound('game-over'); } catch (_) {}
+  try { haptic(HAPTIC_ELIMINATE); } catch (_) {}
+
+  const playAgainBtn = document.getElementById('btn-play-again');
+  if (playAgainBtn) {
+    playAgainBtn.addEventListener('click', () => {
+      if (isHost) {
+        if (onPlayAgain) onPlayAgain();
+      } else {
+        try {
+          showToast('Only the host can start a new round', { type: 'warn', duration: 2000 });
+        } catch (_) {}
+      }
     });
   }
 

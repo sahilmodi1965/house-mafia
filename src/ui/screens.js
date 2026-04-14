@@ -1,4 +1,6 @@
 import { ROLES } from '../roles.js';
+import { playSound } from '../audio.js';
+import { haptic, HAPTIC_TAP } from '../haptic.js';
 
 /**
  * Role reveal screen — shows each player their assigned role
@@ -57,6 +59,9 @@ export function showRoleReveal(app, roleData, playerName, onReady) {
 
   setTimeout(() => {
     cardInner.classList.add('flipped');
+    // #57 #58: role-reveal feedback — fires once per game on mount.
+    try { playSound('role-reveal'); } catch (_) {}
+    try { haptic(HAPTIC_TAP); } catch (_) {}
 
     // After flip animation, show description and Ready button
     setTimeout(() => {

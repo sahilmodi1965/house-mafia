@@ -7,12 +7,14 @@ import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction, scheduleStubChatter } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 import { showGameOver } from './ui/game-over.js';
+import { showEliminatedSpectator } from './phases/spectator.js';
 import {
   resolveMafiaKill as pureResolveMafiaKill,
   resolveNightKill,
   checkWinCondition as pureCheckWinCondition,
   shouldDelayEndNight,
 } from './engine/resolve.js';
+import { showToast } from './ui/toast.js';
 
 /**
  * Game loop orchestration.
@@ -38,7 +40,7 @@ function checkWinCondition() {
  * @param {string|null} opts.nightEliminatedName - Name eliminated during night
  * @param {Function} opts.onReturnToTitle - Called to navigate back to title screen
  */
-function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName, onReturnToTitle }) {
+function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName, onReturnToTitle, onRestartRoom }) {
   if (isHost) {
     gameState.phase = 'day-discuss';
     channel.send({
@@ -73,7 +75,7 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
       for (const h of chatterTimers) clearTimeout(h);
       chatterTimers.length = 0;
       if (isHost) {
-        startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+        startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom });
       }
     },
   });
@@ -124,29 +126,35 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
  * @param {HTMLElement} opts.app
  * @param {Function} opts.onReturnToTitle - Called when the player leaves to title
  */
-function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle }) {
+function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom }) {
   showGameOver(app, {
     winner,
     players,
     isHost,
     onPlayAgain: () => {
-      // Host broadcasts return-to-lobby; resets state locally
-      if (isHost) {
+      // Issue #47: Play Again now restarts the room in place rather
+      // than tearing down the Supabase channel. The host is the only
+      // client that actually broadcasts game:restart — non-host clicks
+      // surface a toast instead (see game-over.js → onPlayAgain wires
+      // host-only on the button; non-host shows "Waiting for host...").
+      if (!isHost) {
+        // Defensive path — game-over.js only renders the button on
+        // hosts, but this keeps the contract explicit.
+        return;
+      }
+      if (channel) {
         channel.send({
           type: 'broadcast',
-          event: 'game:return-lobby',
+          event: 'game:restart',
           payload: {},
         });
       }
-      // Reset game state so a fresh game can start
+      // Reset local state and hand control back to the lobby.
       gameState = null;
-      // Return to lobby by navigating to the title screen.
-      // Players will need to re-create / re-join a room.
-      // Limitation: full lobby reset over Supabase channel is not yet
-      // implemented, so the simplest safe path is returning everyone
-      // to the title screen (which already handles channel teardown via
-      // the Leave flow in room.js).
-      if (onReturnToTitle) onReturnToTitle();
+      try {
+        showToast('New round starting…', { type: 'info', duration: 2000 });
+      } catch (_) {}
+      if (onRestartRoom) onRestartRoom();
     },
     onLeave: () => {
       gameState = null;
@@ -154,8 +162,17 @@ function transitionToGameOver({ winner, players, channel, currentPlayer, isHost,
     },
   });
 
-  // Non-host: also listen for host's Play Again broadcast
+  // Non-host: listen for host's game:restart broadcast and mirror it.
+  // We also keep backward compatibility with game:return-lobby for
+  // clients that may still be on older builds during a rolling deploy.
   if (!isHost) {
+    channel.on('broadcast', { event: 'game:restart' }, () => {
+      gameState = null;
+      try {
+        showToast('New round starting…', { type: 'info', duration: 2000 });
+      } catch (_) {}
+      if (onRestartRoom) onRestartRoom();
+    });
     channel.on('broadcast', { event: 'game:return-lobby' }, () => {
       gameState = null;
       if (onReturnToTitle) onReturnToTitle();
@@ -166,7 +183,7 @@ function transitionToGameOver({ winner, players, channel, currentPlayer, isHost,
 /**
  * Start the voting sub-phase of Day.
  */
-function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }) {
+function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom }) {
   if (isHost) {
     gameState.phase = 'day-vote';
   }
@@ -181,6 +198,16 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
       if (result.eliminatedPlayer && isHost) {
         const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
         if (target) target.alive = false;
+      }
+
+      // #49: if the local player died in this vote, route to the
+      // eliminated-spectator view. gameState.players is the only
+      // source of truth we have in this module-level function.
+      const livePlayers = (gameState && gameState.players) || [];
+      if (result.eliminatedPlayer && result.eliminatedPlayer.id === currentPlayer.id) {
+        // Flip our own alive flag locally if host hasn't already.
+        const me = livePlayers.find((p) => p.id === currentPlayer.id);
+        if (me) me.alive = false;
       }
 
       const winner = checkWinCondition();
@@ -205,8 +232,12 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
           isHost,
           app,
           onReturnToTitle,
+          onRestartRoom,
         });
       } else {
+        // #49: route dead local player to the eliminated spectator
+        // view before advancing phases.
+        if (_eliminatedSpectatorCheck(livePlayers)) return;
         // No winner yet — loop back to a fresh Night. The host
         // re-broadcasts phase:night-start from inside startNightPhase
         // (via the public players list) so joiners re-enter Night too.
@@ -230,6 +261,13 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
  * Set inside startGame() because it closes over channel/currentPlayer/etc.
  */
 let hostStartNextNight = () => {};
+
+// #49: installed by startGame() so module-level phase dispatchers can
+// ask "should this player be in the eliminated-spectator view now?"
+// without plumbing currentRoleData + showEliminatedSpectator through
+// every function signature. Returns true if the spectator view was
+// mounted and the caller should skip its normal phase render.
+let _eliminatedSpectatorCheck = () => false;
 
 /**
  * Start the game. Called when game:start is triggered.
@@ -259,6 +297,7 @@ export function startGame({
   isHost,
   app,
   onReturnToTitle,
+  onRestartRoom, // #47: called to re-render the lobby in place after game-over
   roomConfig, // #54: { preset, disabledRoles, ...durations }
 }) {
   const readySet = new Set();
@@ -270,6 +309,53 @@ export function startGame({
   // clients. Joiners first learn the full list from the host's
   // phase:night-start broadcast.
   let nightPlayerList = players;
+
+  // #49: once-per-game latch. Set when we route the local player into
+  // the eliminated-spectator view so subsequent phase broadcasts don't
+  // overwrite it. Cleared implicitly when game-over fires and the
+  // normal game-over screen takes over.
+  let eliminatedSpectatorMounted = false;
+
+  /**
+   * Route the local player to the eliminated spectator view if they
+   * are marked dead in the given player list. Returns true if the
+   * view was mounted (caller should skip the normal phase render).
+   */
+  function maybeRouteToEliminatedSpectator(nextPlayers) {
+    if (eliminatedSpectatorMounted) return true;
+    if (!Array.isArray(nextPlayers)) return false;
+    // #49: the host runs the game loop and the phase timers. If we
+    // routed the host to the read-only spectator view the game would
+    // freeze — the host's display must stay on the real phase screens
+    // even when they die. Non-host clients take the spectator path.
+    if (isHost) return false;
+    const me = nextPlayers.find((p) => p && p.id === currentPlayer.id);
+    if (!me || me.alive !== false) return false;
+    const role = currentRoleData && currentRoleData.role;
+    eliminatedSpectatorMounted = true;
+    showEliminatedSpectator({
+      app,
+      channel,
+      roomCode,
+      currentPlayer,
+      role,
+      players: nextPlayers,
+      onGameOver: ({ winner, players: endPlayers }) => {
+        eliminatedSpectatorMounted = false;
+        transitionToGameOver({
+          winner,
+          players: endPlayers,
+          channel,
+          currentPlayer,
+          isHost,
+          app,
+          onReturnToTitle,
+          onRestartRoom,
+        });
+      },
+    });
+    return true;
+  }
 
   // Cache of peer private-channel write handles, keyed by playerId.
   // Populated by the host during role-assign (it already subscribes to
@@ -458,6 +544,7 @@ export function startGame({
         app,
         nightEliminatedName: eliminatedName,
         onReturnToTitle,
+        onRestartRoom,
       });
       return;
     }
@@ -611,9 +698,13 @@ export function startGame({
               isHost,
               app,
               onReturnToTitle,
+              onRestartRoom,
             });
             return;
           }
+
+          // #49: host died during night → eliminated spectator view.
+          if (maybeRouteToEliminatedSpectator(gameState.players)) return;
 
           startDayPhase({
             channel,
@@ -622,6 +713,7 @@ export function startGame({
             app,
             nightEliminatedName: eliminatedPlayer ? eliminatedPlayer.name : null,
             onReturnToTitle,
+            onRestartRoom,
           });
         }
         // Non-host clients wait for phase:night-end from the host
@@ -691,6 +783,7 @@ export function startGame({
   // There is only one active game session per module, same as
   // gameState, so a single module-level ref is safe.
   hostStartNextNight = () => startNightPhase();
+  _eliminatedSpectatorCheck = (nextPlayers) => maybeRouteToEliminatedSpectator(nextPlayers);
 
   // Handle this player's role assignment. It arrives on their OWN private
   // channel. The shared `channel` never carries role data.
@@ -821,6 +914,9 @@ export function startGame({
       }
 
       const doTransition = () => {
+        // #49: if we died during night, skip the day-discuss view and
+        // route to the eliminated spectator view instead.
+        if (maybeRouteToEliminatedSpectator(msg.payload.players)) return;
         startDayPhase({
           channel,
           currentPlayer,
@@ -828,6 +924,7 @@ export function startGame({
           app,
           nightEliminatedName: msg.payload.eliminatedName,
           onReturnToTitle,
+          onRestartRoom,
         });
       };
 
@@ -855,7 +952,7 @@ export function startGame({
     // Attached once at game-start to avoid listener accumulation across
     // rounds. Fires on every Day cycle.
     channel.on('broadcast', { event: 'phase:day-vote' }, () => {
-      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom });
     });
 
     // Non-host: listen for host's end-game broadcast
@@ -875,6 +972,7 @@ export function startGame({
         isHost,
         app,
         onReturnToTitle,
+        onRestartRoom,
       });
     });
   }

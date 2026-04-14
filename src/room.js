@@ -8,6 +8,8 @@ import {
   defaultRoomConfig,
   applyRoomConfig,
 } from './ui/settings-modal.js';
+import { showToast } from './ui/toast.js';
+import { isNameAvailable, playAgainResetPlayers } from './engine/resolve.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -478,6 +480,30 @@ async function subscribeToRoom(app, onBack) {
         return;
       }
 
+      // Issue #52: name collision check. Build a roster snapshot from
+      // the current presence state and refuse to join if the
+      // requested display name is already taken (case-insensitive).
+      const existingNames = [];
+      for (const key of Object.keys(state)) {
+        const presences = state[key];
+        if (!presences || presences.length === 0) continue;
+        const latest = presences[presences.length - 1];
+        if (latest && !latest.isSpectator && typeof latest.name === 'string') {
+          existingNames.push({ name: latest.name });
+        }
+      }
+      if (!isNameAvailable(currentPlayer.name, existingNames)) {
+        channel.unsubscribe();
+        channel = null;
+        const errorEl = document.getElementById('join-error');
+        if (errorEl) errorEl.textContent = 'That name is taken — try another.';
+        try {
+          showToast('That name is taken — try another.', { type: 'error', duration: 2500 });
+        } catch (_) {}
+        reject(new Error('Name taken'));
+        return;
+      }
+
       // Room exists and has capacity — proceed
       await channel.track(currentPlayer);
       try {
@@ -521,6 +547,36 @@ async function subscribeToRoom(app, onBack) {
           const lobbyEl = document.getElementById('screen-lobby');
           if (lobbyEl) renderLobby();
         })
+        .on('broadcast', { event: 'lobby:kick' }, (msg) => {
+          // #56: host has removed a player from the lobby.
+          const payload = (msg && msg.payload) || {};
+          const targetId = payload.targetPlayerId;
+          const targetName = payload.targetName || 'player';
+          const kickerName = payload.kickerName || 'Host';
+          if (!targetId) return;
+
+          // If I'm the one being kicked, tear down and bail.
+          if (currentPlayer && targetId === currentPlayer.id) {
+            try {
+              showToast('You were removed from the room', { type: 'error', duration: 4000 });
+            } catch (_) {}
+            const back = onBackFn;
+            cleanup();
+            if (back) back();
+            return;
+          }
+
+          // Otherwise: remove the kicked player from my local roster
+          // and show an informational toast. The host already removed
+          // the row locally; peers reach this code path.
+          players = players.filter((p) => p.id !== targetId);
+          renderLobby();
+          if (!isHost) {
+            try {
+              showToast(`${kickerName} kicked ${targetName}`, { type: 'info', duration: 2500 });
+            } catch (_) {}
+          }
+        })
         .on('broadcast', { event: 'game:start' }, () => {
           if (isHost) return; // host already triggered startGame locally
           // Spectators (late joiners) stay on the spectator screen and
@@ -539,6 +595,7 @@ async function subscribeToRoom(app, onBack) {
               cleanup();
               onBack();
             },
+            onRestartRoom: () => restartRoomInPlace(),
             roomConfig,
           });
         })
@@ -600,12 +657,29 @@ function showLobby(app, onBack) {
     : '';
 
   app.innerHTML = `
+    <style>
+      .lobby-kick-btn {
+        margin-left: 0.5rem;
+        background: transparent;
+        border: 1px solid var(--neon-pink, #ff00aa);
+        color: var(--neon-pink, #ff00aa);
+        border-radius: 4px;
+        width: 1.6rem;
+        height: 1.6rem;
+        font-size: 0.9rem;
+        cursor: pointer;
+        vertical-align: middle;
+      }
+      .lobby-kick-btn:hover { background: var(--neon-pink, #ff00aa); color: #fff; }
+    </style>
     <div id="screen-lobby" class="screen active">
       <h1>Lobby</h1>
       <p class="room-code-display">Room Code: <span id="lobby-code">${roomCode}</span></p>
       <p class="player-count" id="lobby-count">${players.length}/${GAME.MAX_PLAYERS}</p>
       <ul class="player-list" id="lobby-players"></ul>
       <p class="lobby-config" id="lobby-config"></p>
+      <button class="btn btn--yellow" id="btn-share-room">Share Room</button>
+      <div id="share-panel" class="share-panel" hidden></div>
       <div id="lobby-actions"></div>
       ${settingsBtn}
       ${devStubRow}
@@ -617,6 +691,28 @@ function showLobby(app, onBack) {
     cleanup();
     onBack();
   });
+
+  // #48: Share Room — expose a join URL + QR code inline. Pure UI;
+  // no Supabase writes, no new dependency. QR is rendered via the
+  // free Google Charts URL so we don't ship a QR encoder.
+  const shareBtn = document.getElementById('btn-share-room');
+  const sharePanel = document.getElementById('share-panel');
+  if (shareBtn && sharePanel) {
+    shareBtn.addEventListener('click', () => {
+      const url = buildShareUrl(roomCode);
+      renderSharePanel(sharePanel, url);
+      sharePanel.hidden = false;
+      // Attempt clipboard copy on click; fall back silently if blocked.
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard
+          .writeText(url)
+          .then(() => {
+            try { showToast('Link copied', { type: 'info', duration: 2000 }); } catch (_) {}
+          })
+          .catch(() => {});
+      }
+    });
+  }
 
   if (isHost) {
     const settingsEl = document.getElementById('btn-settings');
@@ -676,11 +772,54 @@ function renderLobby() {
   }
 
   listEl.innerHTML = players
-    .map(
-      (p) =>
-        `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}</li>`
-    )
+    .map((p) => {
+      // #56: host sees a kick ✕ button next to every non-host,
+      // non-stub player. Host cannot kick themselves. Stubs already
+      // have their own local removal paths and are excluded here.
+      const canKick = isHost && !p.isHost && !p.isStub;
+      const kickBtn = canKick
+        ? `<button class="lobby-kick-btn" data-kick-id="${p.id}" data-kick-name="${p.name}" aria-label="Remove ${p.name}">✕</button>`
+        : '';
+      return `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}${kickBtn}</li>`;
+    })
     .join('');
+
+  // #56: wire kick buttons. Opens a confirm prompt, broadcasts
+  // lobby:kick on confirmation. The kicked client receives the
+  // broadcast and tears down its own session.
+  if (isHost) {
+    const kickButtons = listEl.querySelectorAll('.lobby-kick-btn');
+    kickButtons.forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const targetId = btn.getAttribute('data-kick-id');
+        const targetName = btn.getAttribute('data-kick-name') || '';
+        if (!targetId) return;
+        const ok = window.confirm(`Remove ${targetName}?`);
+        if (!ok) return;
+
+        // Broadcast kick to every client. The target acts on it;
+        // others render a status toast.
+        if (channel && typeof channel.send === 'function') {
+          channel.send({
+            type: 'broadcast',
+            event: 'lobby:kick',
+            payload: {
+              targetPlayerId: targetId,
+              targetName,
+              kickerName: (currentPlayer && currentPlayer.name) || 'Host',
+            },
+          });
+        }
+        // Locally remove from roster + re-render.
+        players = players.filter((p) => p.id !== targetId);
+        renderLobby();
+        try {
+          showToast(`Kicked ${targetName}`, { type: 'info', duration: 2000 });
+        } catch (_) {}
+      });
+    });
+  }
 
   if (isHost) {
     const minRequired = DEV_MODE ? GAME.DEV_MIN_PLAYERS : GAME.MIN_PLAYERS;
@@ -736,6 +875,7 @@ function renderLobby() {
             cleanup();
             if (back) back();
           },
+          onRestartRoom: () => restartRoomInPlace(),
           roomConfig,
         });
       });
@@ -743,6 +883,86 @@ function renderLobby() {
   } else {
     actionsEl.innerHTML = `<p class="waiting-text">Waiting for host to start...</p>`;
   }
+}
+
+/**
+ * Issue #48: build a shareable join URL for the given room code.
+ * Re-uses the current origin + pathname so gh-pages preview URLs
+ * and the live build both stay in sync. The `?room=` param is
+ * consumed at boot in main.js.
+ */
+function buildShareUrl(code) {
+  try {
+    const base = `${window.location.origin}${window.location.pathname}`;
+    return `${base}?room=${encodeURIComponent(code || '')}`;
+  } catch (_) {
+    return `?room=${code || ''}`;
+  }
+}
+
+/**
+ * Issue #48: render the share panel (link text + lazy QR image).
+ * Uses the Google Charts QR endpoint — zero dependency, stable URL.
+ */
+function renderSharePanel(panelEl, url) {
+  const qrSrc = `https://chart.googleapis.com/chart?cht=qr&chs=180x180&chl=${encodeURIComponent(url)}`;
+  panelEl.innerHTML = `
+    <style>
+      .share-panel {
+        margin: 0.75rem auto;
+        padding: 0.75rem;
+        border: 1px solid var(--neon-cyan, #00f0ff);
+        border-radius: 6px;
+        max-width: 18rem;
+        text-align: center;
+      }
+      .share-panel__url {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8rem;
+        word-break: break-all;
+        color: var(--neon-cyan, #00f0ff);
+        margin-bottom: 0.5rem;
+      }
+      .share-panel__qr {
+        width: 180px;
+        height: 180px;
+        background: #fff;
+        padding: 4px;
+        border-radius: 4px;
+      }
+    </style>
+    <div class="share-panel__url" id="share-panel-url">${url}</div>
+    <img class="share-panel__qr" loading="lazy" alt="Room QR code" src="${qrSrc}" />
+  `;
+}
+
+/**
+ * Issue #47: Play Again in-place. Resets every player row in the local
+ * roster so the next game starts from clean state, flips the host's
+ * presence phase back to 'lobby' (so new joiners get the lobby screen
+ * instead of spectator), and re-renders the lobby. The Supabase channel
+ * and currentPlayer identity are preserved — this is NOT a teardown.
+ */
+function restartRoomInPlace() {
+  if (!appEl) return;
+  // Strip transient game state from every player via the pure helper.
+  // Preserves id/name/isHost/isStub; drops alive/role/votedFor.
+  players = playAgainResetPlayers(players);
+
+  if (isHost && currentPlayer) {
+    currentPlayer = { ...currentPlayer, phase: 'lobby' };
+    if (channel && typeof channel.track === 'function') {
+      try {
+        channel.track(currentPlayer);
+      } catch (err) {
+        console.error('restartRoomInPlace: failed to re-track host as lobby', err);
+      }
+    }
+  }
+
+  // showLobby re-renders from scratch and rewires the host Start /
+  // Settings listeners. onBackFn is already cached on the module.
+  showLobby(appEl, onBackFn || (() => {}));
 }
 
 // --- Cleanup ---

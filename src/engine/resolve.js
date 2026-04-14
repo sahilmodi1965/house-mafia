@@ -124,6 +124,54 @@ export function shouldDelayEndNight({ nightActionKind, investigationResultShownA
 }
 
 /**
+ * Issue #52: check if a candidate display name is available in the
+ * given room roster. Returns false for empty/whitespace input, and
+ * performs a case-insensitive trim-compare against every existing
+ * player's name.
+ *
+ * Pure — no DOM, no storage. Consumed by room.js (lobby join validation)
+ * and by tests/engine-sim.js.
+ *
+ * @param {string} name
+ * @param {Array<{name?:string}>} existingPlayers
+ * @returns {boolean}
+ */
+export function isNameAvailable(name, existingPlayers) {
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return false;
+  if (!Array.isArray(existingPlayers)) return true;
+  const needle = trimmed.toLowerCase();
+  for (const p of existingPlayers) {
+    if (!p || typeof p.name !== 'string') continue;
+    if (p.name.trim().toLowerCase() === needle) return false;
+  }
+  return true;
+}
+
+/**
+ * Issue #47: reset transient game state on every player so the room
+ * can host a fresh game. Preserves id/name/isHost/isStub; strips
+ * alive/role/votedFor (plus any other transient fields present).
+ *
+ * @param {Array<Object>} players
+ * @returns {Array<Object>}
+ */
+export function playAgainResetPlayers(players) {
+  if (!Array.isArray(players)) return [];
+  return players.map((p) => {
+    if (!p || typeof p !== 'object') return p;
+    const next = {
+      id: p.id,
+      name: p.name,
+    };
+    if (p.isHost) next.isHost = true;
+    if (p.isStub) next.isStub = true;
+    return next;
+  });
+}
+
+/**
  * Evaluate win conditions from the current player snapshot.
  *   - 'guests' if no living Mafia
  *   - 'mafia'  if living Mafia count >= living non-Mafia count

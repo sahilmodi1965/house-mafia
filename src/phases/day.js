@@ -1,6 +1,9 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
 import { DEV_MODE } from '../dev.js';
+import { playSound } from '../audio.js';
+import { haptic, HAPTIC_ELIMINATE } from '../haptic.js';
+import { showToast } from '../ui/toast.js';
 
 /**
  * Day discussion phase.
@@ -32,10 +35,29 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
   // Track current player's active suspect (at most one at a time)
   let myCurrentSuspect = null; // targetId or null
 
-  // Night elimination announcement
-  const announcementHTML = eliminatedName
-    ? `<p class="day-announcement">During the night, <strong>${eliminatedName}</strong> was eliminated.</p>`
-    : `<p class="day-announcement">No one was eliminated during the night.</p>`;
+  // Night elimination announcement. #53: if we can resolve the
+  // eliminated player's role from the incoming player list, render
+  // a role-reveal-animate badge alongside the name so every player
+  // sees the dramatic reveal (not just the eliminated player).
+  let announcementHTML;
+  if (eliminatedName) {
+    const victim = players.find((p) => p.name === eliminatedName);
+    const role = victim && victim.role;
+    if (role && role.id) {
+      announcementHTML = `
+        <p class="day-announcement">
+          During the night, <strong>${eliminatedName}</strong> was eliminated.
+          <span class="role-reveal-animate role-reveal-badge"
+                style="--reveal-color: ${role.color}; color: ${role.color}">
+            ${role.emoji} ${role.name}
+          </span>
+        </p>`;
+    } else {
+      announcementHTML = `<p class="day-announcement">During the night, <strong>${eliminatedName}</strong> was eliminated.</p>`;
+    }
+  } else {
+    announcementHTML = `<p class="day-announcement">No one was eliminated during the night.</p>`;
+  }
 
   // #102: dev-mode stub chatter region. Rendered only when DEV_MODE is
   // true — never in a real multiplayer game. Display-only; never hits
@@ -110,7 +132,7 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
         payload: {},
       });
       if (onDiscussionEnd) onDiscussionEnd();
-    });
+    }, { fireWarnings: false });
     hostTimer.start();
   } else {
     // Non-host: listen for ticks
@@ -163,6 +185,23 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
 
   // Initial render
   renderPlayerList();
+
+  // #57 #58: night-kill feedback. Fires on every client exactly once
+  // per round when a night elimination is announced. Non-host clients
+  // enter this phase via phase:day-discuss broadcast, host enters via
+  // local startDayPhase — both paths pass through here.
+  if (eliminatedName) {
+    try { playSound('elimination'); } catch (_) {}
+    try { haptic(HAPTIC_ELIMINATE); } catch (_) {}
+    try {
+      showToast(`${eliminatedName} was eliminated`, { type: 'warn', duration: 3000 });
+    } catch (_) {}
+    // #53: pair the elimination announcement with the role-reveal
+    // sound so the big badge-pop has its audio cue.
+    setTimeout(() => {
+      try { playSound('role-reveal'); } catch (_) {}
+    }, 200);
+  }
 
   // --- Suspect broadcast logic ---
 

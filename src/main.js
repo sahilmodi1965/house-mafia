@@ -2,6 +2,9 @@ import { createClient } from '@supabase/supabase-js';
 import { setSupabase, showCreateScreen, showJoinScreen } from './room.js';
 import { DEV_MODE } from './dev.js';
 import { startPassAndPlay } from './pass-and-play.js';
+// #53: role-reveal animation tunables. Import via JS so Vite bundles
+// the CSS into docs/assets — no index.html edit needed.
+import './styles/role-reveal-tunables.css';
 
 // --- Supabase singleton ---
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -46,4 +49,18 @@ function showTitle() {
 }
 
 // --- Boot ---
-showTitle();
+// #48: auto-advance to the Join screen when the URL carries a
+// ?room=XXXX param (from a shared link / QR code scan). The join
+// input is pre-filled but the user still enters their display name.
+const urlRoom = new URLSearchParams(window.location.search).get('room');
+if (urlRoom && /^[A-Z0-9]{3,6}$/i.test(urlRoom)) {
+  showTitle();
+  // Open join screen after the title paints, then pre-fill the code.
+  showJoinScreen(app, showTitle);
+  const codeInput = document.getElementById('join-code');
+  if (codeInput) {
+    codeInput.value = urlRoom.toUpperCase();
+  }
+} else {
+  showTitle();
+}

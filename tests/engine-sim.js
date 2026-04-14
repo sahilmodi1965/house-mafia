@@ -32,6 +32,8 @@ import {
   resolveNightKill,
   checkWinCondition,
   shouldDelayEndNight,
+  isNameAvailable,
+  playAgainResetPlayers,
 } from '../src/engine/resolve.js';
 
 // ---------------------------------------------------------------- harness
@@ -502,9 +504,55 @@ for (const n of [4, 8, 12, 16]) {
   assert(guestWins > 0, `N=${n}: guests can win`);
 }
 
+// ---------------------------------------------------------------- 7. lobby + restart
+
+section('7. Lobby + restart logic (pure)');
+
+{
+  assertEq(isNameAvailable('', []), false, 'isNameAvailable: empty → false');
+  assertEq(isNameAvailable('   ', []), false, 'isNameAvailable: whitespace-only → false');
+  assertEq(
+    isNameAvailable('Alex', [{ name: 'Blake' }, { name: 'Casey' }]),
+    true,
+    'isNameAvailable: new unique name → true'
+  );
+  assertEq(
+    isNameAvailable('Alex', [{ name: 'Alex' }]),
+    false,
+    'isNameAvailable: exact case match → false'
+  );
+  assertEq(
+    isNameAvailable('ALEX', [{ name: 'alex' }]),
+    false,
+    'isNameAvailable: case-insensitive match → false'
+  );
+  assertEq(
+    isNameAvailable('  Alex  ', [{ name: 'alex' }]),
+    false,
+    'isNameAvailable: whitespace-padded match → false'
+  );
+}
+
+{
+  // playAgainResetPlayers: clears alive/role/votedFor while preserving identity.
+  const before = [
+    { id: 'p1', name: 'Alex', isHost: true, role: { id: 'mafia' }, alive: false, votedFor: 'p2' },
+    { id: 'p2', name: 'Blake', isStub: true, role: { id: 'guest' }, alive: true },
+    { id: 'p3', name: 'Casey', alive: true, role: { id: 'host' }, votedFor: 'p1' },
+  ];
+  const after = playAgainResetPlayers(before);
+  assertEq(after.length, 3, 'playAgainResetPlayers: preserves length');
+  assertEq(after[0], { id: 'p1', name: 'Alex', isHost: true }, 'playAgainResetPlayers: preserves host identity');
+  assertEq(after[1], { id: 'p2', name: 'Blake', isStub: true }, 'playAgainResetPlayers: preserves stub identity');
+  assertEq(after[2], { id: 'p3', name: 'Casey' }, 'playAgainResetPlayers: strips role/alive/votedFor on plain player');
+}
+{
+  assertEq(playAgainResetPlayers([]), [], 'playAgainResetPlayers: handles empty array');
+}
+
 // ---------------------------------------------------------------- composer coverage
 
-section('6. Composer distribution coverage — observed counts');
+section('8. Composer distribution coverage — observed counts');
 console.log('  N  | M H D Doc BG G  | shape');
 for (const n of Object.keys(seenExact)) {
   const c = seenExact[n];
