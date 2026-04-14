@@ -14,9 +14,13 @@
 /** Whether dev mode is active for this page load. */
 export const DEV_MODE = new URLSearchParams(window.location.search).get('dev') === '1';
 
+// #103: base names — kept bare (no "Stub-" prefix) so we can compose
+// unique display names as "Stub-<base>" for the first wrap, then
+// "Stub-<base>-2", "Stub-<base>-3", ... for each subsequent wrap. This
+// scales uniquely to any N the lobby permits (MAX_PLAYERS = 16 today).
 const STUB_NAMES = [
-  'Stub-Alex', 'Stub-Blake', 'Stub-Casey', 'Stub-Dana',
-  'Stub-Ellis', 'Stub-Fran', 'Stub-Glen', 'Stub-Harper',
+  'Alex', 'Blake', 'Casey', 'Dana',
+  'Ellis', 'Fran', 'Glen', 'Harper',
 ];
 
 let _stubIndex = 0;
@@ -26,7 +30,9 @@ let _stubIndex = 0;
  * @returns {{ id: string, name: string, isHost: false, isStub: true }}
  */
 export function createStubPlayer() {
-  const name = STUB_NAMES[_stubIndex % STUB_NAMES.length];
+  const wrap = Math.floor(_stubIndex / STUB_NAMES.length);
+  const base = STUB_NAMES[_stubIndex % STUB_NAMES.length];
+  const name = wrap === 0 ? `Stub-${base}` : `Stub-${base}-${wrap + 1}`;
   _stubIndex++;
   return {
     id: `stub-${crypto.randomUUID()}`,
