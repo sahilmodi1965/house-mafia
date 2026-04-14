@@ -40,7 +40,7 @@ function checkWinCondition() {
  * @param {string|null} opts.nightEliminatedName - Name eliminated during night
  * @param {Function} opts.onReturnToTitle - Called to navigate back to title screen
  */
-function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName, onReturnToTitle }) {
+function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedName, onReturnToTitle, onRestartRoom }) {
   if (isHost) {
     gameState.phase = 'day-discuss';
     channel.send({
@@ -75,7 +75,7 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
       for (const h of chatterTimers) clearTimeout(h);
       chatterTimers.length = 0;
       if (isHost) {
-        startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+        startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom });
       }
     },
   });
@@ -183,7 +183,7 @@ function transitionToGameOver({ winner, players, channel, currentPlayer, isHost,
 /**
  * Start the voting sub-phase of Day.
  */
-function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }) {
+function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom }) {
   if (isHost) {
     gameState.phase = 'day-vote';
   }
@@ -201,10 +201,9 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
       }
 
       // #49: if the local player died in this vote, route to the
-      // eliminated-spectator view. On host we use gameState.players;
-      // on non-host we use the players we were handed via the phase
-      // callback, which is the same reference the phase screens use.
-      const livePlayers = isHost && gameState ? gameState.players : players;
+      // eliminated-spectator view. gameState.players is the only
+      // source of truth we have in this module-level function.
+      const livePlayers = (gameState && gameState.players) || [];
       if (result.eliminatedPlayer && result.eliminatedPlayer.id === currentPlayer.id) {
         // Flip our own alive flag locally if host hasn't already.
         const me = livePlayers.find((p) => p.id === currentPlayer.id);
@@ -325,6 +324,11 @@ export function startGame({
   function maybeRouteToEliminatedSpectator(nextPlayers) {
     if (eliminatedSpectatorMounted) return true;
     if (!Array.isArray(nextPlayers)) return false;
+    // #49: the host runs the game loop and the phase timers. If we
+    // routed the host to the read-only spectator view the game would
+    // freeze — the host's display must stay on the real phase screens
+    // even when they die. Non-host clients take the spectator path.
+    if (isHost) return false;
     const me = nextPlayers.find((p) => p && p.id === currentPlayer.id);
     if (!me || me.alive !== false) return false;
     const role = currentRoleData && currentRoleData.role;
@@ -540,6 +544,7 @@ export function startGame({
         app,
         nightEliminatedName: eliminatedName,
         onReturnToTitle,
+        onRestartRoom,
       });
       return;
     }
@@ -708,6 +713,7 @@ export function startGame({
             app,
             nightEliminatedName: eliminatedPlayer ? eliminatedPlayer.name : null,
             onReturnToTitle,
+            onRestartRoom,
           });
         }
         // Non-host clients wait for phase:night-end from the host
@@ -946,7 +952,7 @@ export function startGame({
     // Attached once at game-start to avoid listener accumulation across
     // rounds. Fires on every Day cycle.
     channel.on('broadcast', { event: 'phase:day-vote' }, () => {
-      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle });
+      startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom });
     });
 
     // Non-host: listen for host's end-game broadcast
