@@ -1,5 +1,6 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
+import { DEV_MODE } from '../dev.js';
 
 /**
  * Day discussion phase.
@@ -36,11 +37,49 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
     ? `<p class="day-announcement">During the night, <strong>${eliminatedName}</strong> was eliminated.</p>`
     : `<p class="day-announcement">No one was eliminated during the night.</p>`;
 
+  // #102: dev-mode stub chatter region. Rendered only when DEV_MODE is
+  // true — never in a real multiplayer game. Display-only; never hits
+  // Supabase and never persists. Exists so solo dev-mode testing has
+  // something to read during Discussion at N=16.
+  const devChatterHTML = DEV_MODE
+    ? `
+    <style>
+      .dev-chatter {
+        margin: 0.5rem 0 0.75rem;
+        padding: 0.5rem 0.75rem;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid var(--neon-pink, #ff00aa);
+        border-radius: 6px;
+        max-height: 10rem;
+        overflow-y: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8125rem;
+        line-height: 1.4;
+        color: var(--neon-cyan, #00f0ff);
+      }
+      .dev-chatter__header {
+        font-size: 0.6875rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--neon-yellow, #ffdd00);
+        margin-bottom: 0.25rem;
+      }
+      .dev-chatter__line {
+        white-space: normal;
+        word-break: break-word;
+      }
+    </style>
+    <div class="dev-chatter" id="dev-chatter" aria-hidden="true">
+      <div class="dev-chatter__header">dev chatter</div>
+    </div>`
+    : '';
+
   app.innerHTML = `
     <div id="screen-day-discuss" class="screen active">
       <h1>Day -- Discuss!</h1>
       ${announcementHTML}
       <div id="day-timer-container"></div>
+      ${devChatterHTML}
       <ul class="day-player-list" id="day-player-list"></ul>
       ${!isAlive ? '<p class="day-chat__spectator">You are eliminated. Spectating.</p>' : ''}
     </div>
@@ -179,6 +218,20 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
     applyLocalUnsuspect(voterId, targetId);
   });
 
+  // #102: dev-chatter append handle. No-op when DEV_MODE is false (no
+  // region rendered). Caller (game.js) pushes one line per stub emit.
+  function appendChatter(text) {
+    if (!DEV_MODE) return;
+    const region = document.getElementById('dev-chatter');
+    if (!region) return;
+    const line = document.createElement('div');
+    line.className = 'dev-chatter__line';
+    line.textContent = text;
+    region.appendChild(line);
+    // Keep the last line visible.
+    region.scrollTop = region.scrollHeight;
+  }
+
   // --- Click handler for tap-to-suspect (alive players only) ---
 
   if (isAlive) {
@@ -209,4 +262,9 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
       }
     });
   }
+
+  // #102: expose dev-chatter append handle to the caller so game.js
+  // can push stub chatter lines during Discussion. Returns an empty
+  // shape in non-dev builds so existing callers don't break.
+  return { appendChatter };
 }

@@ -66,6 +66,80 @@ export const devStorage = {
   },
 };
 
+// #102: chatter templates. Kept short so the dev chatter strip in
+// day.js stacks readably at N=16. The {name} / {target} placeholders
+// are replaced at emit time.
+const CHATTER_TEMPLATES = [
+  '{name}: I think {target} is sus.',
+  '{name}: Something feels off about {target}.',
+  "{name}: I'm voting {target} today.",
+  '{name}: {target} is way too quiet.',
+];
+
+/**
+ * #102 — Schedule one stub to emit a chatter line during Day Discussion.
+ *
+ * Dev-mode only. The caller provides an `onChat` callback that renders
+ * { stubId, stubName, text } into the local DOM; no Supabase, no
+ * persistence, no broadcast. This exists solely so a solo dev-mode
+ * host has something to react to during Discussion when testing
+ * vote-adjacent features (#47, #52, #53) without a real party.
+ *
+ * Role-aware suspect selection:
+ *   - mafia stub: deflects onto a random non-mafia alive player.
+ *   - town stub: 40% accuracy — 40% chance to suspect an actual mafia,
+ *     60% chance to suspect a random non-self non-mafia alive player.
+ *
+ * @param {Object} opts
+ * @param {string} opts.stubId
+ * @param {string} opts.stubName
+ * @param {string} opts.stubRole - role id ('mafia'|'host'|'detective'|...)
+ * @param {Array}  opts.allPlayers - [{ id, name, alive, role: { id } }, ...]
+ * @param {Function} opts.onChat - called with { stubId, stubName, text }
+ * @param {number} [opts.delayMs] - delay before emit (default: 1500-4500ms random)
+ */
+export function scheduleStubChatter({ stubId, stubName, stubRole, allPlayers, onChat, delayMs }) {
+  if (!DEV_MODE) return;
+  if (!Array.isArray(allPlayers) || allPlayers.length === 0) return;
+
+  const alive = allPlayers.filter((p) => p.alive !== false && p.id !== stubId);
+  if (alive.length === 0) return;
+
+  let target = null;
+  if (stubRole === 'mafia') {
+    // Deflect: pick a random non-mafia alive player as "suspect".
+    const candidates = alive.filter((p) => p.role?.id !== 'mafia');
+    if (candidates.length === 0) return;
+    target = candidates[Math.floor(Math.random() * candidates.length)];
+  } else {
+    // Town: 40% accurate, 60% noise.
+    const mafia = alive.filter((p) => p.role?.id === 'mafia');
+    const nonMafia = alive.filter((p) => p.role?.id !== 'mafia');
+    if (Math.random() < 0.4 && mafia.length > 0) {
+      target = mafia[Math.floor(Math.random() * mafia.length)];
+    } else if (nonMafia.length > 0) {
+      target = nonMafia[Math.floor(Math.random() * nonMafia.length)];
+    } else if (mafia.length > 0) {
+      target = mafia[Math.floor(Math.random() * mafia.length)];
+    }
+  }
+
+  if (!target) return;
+
+  const template = CHATTER_TEMPLATES[Math.floor(Math.random() * CHATTER_TEMPLATES.length)];
+  const text = template.replace('{name}', stubName).replace('{target}', target.name);
+  const wait = typeof delayMs === 'number' ? delayMs : 1500 + Math.random() * 3000;
+
+  const handle = setTimeout(() => {
+    try {
+      onChat({ stubId, stubName, text });
+    } catch (err) {
+      console.error('scheduleStubChatter onChat threw', err);
+    }
+  }, wait);
+  return handle;
+}
+
 /**
  * Schedule stub auto-resolution for a specific game action.
  *
