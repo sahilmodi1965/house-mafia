@@ -9,6 +9,7 @@ import {
   applyRoomConfig,
 } from './ui/settings-modal.js';
 import { showToast } from './ui/toast.js';
+import { qrImage } from './ui/qr.js';
 import { isNameAvailable, playAgainResetPlayers } from './engine/resolve.js';
 
 /**
@@ -935,11 +936,10 @@ function buildShareUrl(code) {
 }
 
 /**
- * Issue #48: render the share panel (link text + lazy QR image).
- * Uses the Google Charts QR endpoint — zero dependency, stable URL.
+ * Issue #48 / #108: render the share panel (link text + QR image).
+ * The QR image comes from ui/qr.js — no Google Charts dependency.
  */
 function renderSharePanel(panelEl, url) {
-  const qrSrc = `https://chart.googleapis.com/chart?cht=qr&chs=180x180&chl=${encodeURIComponent(url)}`;
   panelEl.innerHTML = `
     <style>
       .share-panel {
@@ -966,8 +966,10 @@ function renderSharePanel(panelEl, url) {
       }
     </style>
     <div class="share-panel__url" id="share-panel-url">${url}</div>
-    <img class="share-panel__qr" loading="lazy" alt="Room QR code" src="${qrSrc}" />
   `;
+  // #108: append the QR via ui/qr.js so the replacement is a 1-line
+  // swap if the endpoint ever changes again.
+  panelEl.appendChild(qrImage(url));
 }
 
 /**
