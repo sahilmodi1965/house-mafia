@@ -15,6 +15,9 @@
  * isHost:     boolean — controls Play Again button behaviour.
  */
 
+import { playSound } from '../audio.js';
+import { haptic, HAPTIC_ELIMINATE } from '../haptic.js';
+
 const ROLE_ORDER = { mafia: 0, host: 1, guest: 2 };
 
 /**
@@ -84,6 +87,10 @@ export function showGameOver(container, { winner, players, onPlayAgain, onLeave,
       </div>
     </div>
   `;
+
+  // #57 #58: game-over feedback — fires once on mount, on every client.
+  try { playSound('game-over'); } catch (_) {}
+  try { haptic(HAPTIC_ELIMINATE); } catch (_) {}
 
   if (isHost) {
     document.getElementById('btn-play-again').addEventListener('click', () => {

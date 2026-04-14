@@ -1,6 +1,9 @@
 import { GAME } from '../config.js';
 import { createTimer } from '../ui/timer.js';
 import { DEV_MODE } from '../dev.js';
+import { playSound } from '../audio.js';
+import { haptic, HAPTIC_ELIMINATE } from '../haptic.js';
+import { showToast } from '../ui/toast.js';
 
 /**
  * Day discussion phase.
@@ -163,6 +166,18 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
 
   // Initial render
   renderPlayerList();
+
+  // #57 #58: night-kill feedback. Fires on every client exactly once
+  // per round when a night elimination is announced. Non-host clients
+  // enter this phase via phase:day-discuss broadcast, host enters via
+  // local startDayPhase — both paths pass through here.
+  if (eliminatedName) {
+    try { playSound('elimination'); } catch (_) {}
+    try { haptic(HAPTIC_ELIMINATE); } catch (_) {}
+    try {
+      showToast(`${eliminatedName} was eliminated`, { type: 'warn', duration: 3000 });
+    } catch (_) {}
+  }
 
   // --- Suspect broadcast logic ---
 
