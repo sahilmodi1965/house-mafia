@@ -64,10 +64,9 @@ function ensureMount() {
     document.head.appendChild(style);
   }
 
-  const host = document.getElementById('app') || document.body;
   mountEl = document.createElement('div');
   mountEl.id = 'toast-stack';
-  host.appendChild(mountEl);
+  document.body.appendChild(mountEl);
   return mountEl;
 }
 
