@@ -552,11 +552,20 @@ export function startGame({
     // (same list, same broadcast already sent) but cheap, and makes
     // re-entry from hostStartNextNight() self-sufficient.
     if (isHost && gameState) {
+      // #114: preserve isHost when projecting gameState → public list.
+      // getGameHostId() reads `isHost` off nightPlayerList to look up the
+      // game host's private channel when a peer (or the local host) needs
+      // to send mafia:pick / host:investigate. Dropping the flag here
+      // made ensureHostPrivateWriteHandle() return null on dev-mode solo
+      // sessions where the ONLY non-stub player was the game host, so
+      // clicks on the Night screen silently dropped and the investigate
+      // result never arrived. See the sprint-1 N=4 full-round test.
       const publicPlayers = gameState.players.map((p) => ({
         id: p.id,
         name: p.name,
         alive: p.alive,
         isStub: !!p.isStub,
+        isHost: !!p.isHost,
       }));
       nightPlayerList = publicPlayers;
       gameState.phase = 'night';
@@ -723,6 +732,7 @@ export function startGame({
                 name: p.name,
                 alive: p.alive,
                 isStub: !!p.isStub,
+                isHost: !!p.isHost,
               })),
             },
           });
@@ -887,6 +897,7 @@ export function startGame({
                   name: p.name,
                   alive: p.alive,
                   isStub: !!p.isStub,
+                  isHost: !!p.isHost,
                 })),
               },
             });
@@ -1139,6 +1150,10 @@ export function startGame({
         role: assignments[p.id].role,
         alive: true,
         isStub: !!p.isStub,
+        // #114: preserve isHost so getGameHostId() can look up the
+        // game host without consulting the original `players` param
+        // (which isn't in scope from ensureHostPrivateWriteHandle).
+        isHost: !!p.isHost,
       })),
       roles: assignments,
       roomCode,
