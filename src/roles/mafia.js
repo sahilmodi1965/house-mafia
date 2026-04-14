@@ -14,6 +14,7 @@ export default {
     'Eliminate guests at night. Win when living Mafia ≥ living non-Mafia.',
   spawnWeight: 1,
   minPlayers: 4,
+  nightActionKind: 'mafia-kill',
   // Lifecycle hooks — schema reserved, wiring is a follow-up.
   nightAction: null,
   dayAction: null,

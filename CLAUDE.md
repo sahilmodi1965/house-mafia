@@ -4,7 +4,7 @@ Conventions and rules for AI agents (Claude Code, the Stratos Games Factory daem
 
 ## Project
 
-**House Mafia** — a mobile-first multiplayer social deduction party game. Think Mafia/Werewolf but set at a house party: lighter, funnier, faster. 4–8 players, 3–5 minute rounds, web-first with Capacitor wrapping for mobile later.
+**House Mafia** — a mobile-first multiplayer social deduction party game. Think Mafia/Werewolf but set at a house party: lighter, funnier, faster. 4–16 players, 3–5 minute rounds, web-first with Capacitor wrapping for mobile later.
 
 This repo is part of the [Stratos Games](https://github.com/sahilmodi1965/stratos-games-factory) portfolio. Play-test feedback comes in via GitHub Issues with the `build-request` label, and the Stratos swarm picks them up. PR previews ship to `gh-pages /pr/<number>/`. The live web build is at `gh-pages /` (mirrored from `docs/`).
 
@@ -74,11 +74,14 @@ House Mafia is Mafia/Werewolf distilled to its purest form for mobile. A group o
 
 ### Players and roles
 
-- **4–8 players** per game. No bots, no AI players.
-- **Role distribution**: 1 Mafia per 4 players (4–5 = 1 Mafia, 6–8 = 2 Mafia). Remainder are split between Guests and 1 Host.
-- Three roles:
-  - **Mafia** — knows who the other Mafia are (if 2). Goal: eliminate Guests until Mafia count ≥ Guest count. During Night, secretly picks one player to eliminate.
+- **4–16 players** per game. No bots, no AI players.
+- **Role distribution**: Role counts are computed by `distributeRoles(n, preset)` in `src/roles/index.js` from a ratio/table in `config.js`. Never hardcode role counts in game logic. The composer guarantees: Mafia ≥ 1, Guests > Mafia, one Host, special roles (Detective/Doctor/Bodyguard) unlock at player-count thresholds defined in config.
+- Six roles:
+  - **Mafia** — knows who the other Mafia are (if 2+). Goal: eliminate Guests until Mafia count ≥ Guest count. During Night, secretly picks one player to eliminate.
   - **Host** (the party host, not a game host) — a special Guest. Once per Night, investigates one player and learns whether they are Mafia or not. Appears as "not Mafia" if investigated.
+  - **Detective** (town, unlocks at 9 players) — once per Night, investigates one player. Result is INVERTED: Mafia show as "not Mafia", non-Mafia show as "Mafia". Counter-intel tool.
+  - **Doctor** (town, unlocks at 11 players) — once per Night, picks a player to save. If Mafia target that player, the kill is blocked. Cannot save the same player on consecutive Nights.
+  - **Bodyguard** (town, unlocks at 13 players) — once per Night, picks a player to protect. If Mafia target that player, the Bodyguard dies instead; the protected player lives. One-shot: the Bodyguard is out after their sacrifice.
   - **Guest** — no special powers. Survives by voting correctly during Day. Wins when all Mafia are eliminated.
 - The **game host** (the player who created the room) is a separate concept from the Host role. The game host has UI controls to start the game but plays with whatever role they're assigned.
 
@@ -127,13 +130,15 @@ House Mafia is Mafia/Werewolf distilled to its purest form for mobile. A group o
 ```js
 export const GAME = {
   MIN_PLAYERS: 4,
-  MAX_PLAYERS: 8,
-  MAFIA_PER_N: 4,            // 1 mafia per this many players
+  MAX_PLAYERS: 16,
   NIGHT_DURATION: 30,         // seconds
   DAY_DURATION: 60,           // seconds
   DISCUSSION_DURATION: 40,    // seconds (first part of day)
   VOTE_DURATION: 20,          // seconds (last part of day)
   ROOM_CODE_LENGTH: 4,
+  ROLE_PRESETS: { classic: [/* N-indexed rows of role counts */] },
+  // CLASSIC_DISTRIBUTION is the authoritative role table, consumed by
+  // distributeRoles(n, 'classic'). See src/config.js for the full data.
 };
 ```
 
@@ -155,7 +160,7 @@ export const GAME = {
 - **Never add a CSS preprocessor (Sass, Less, PostCSS).** Plain CSS with variables is sufficient.
 - **Never add a state management library (Redux, Zustand, MobX).** Game state is a plain JS object broadcast via Supabase.
 - **Never introduce server-side code.** This is a client-only game. Supabase handles multiplayer. No Express, no Fastify, no serverless functions.
-- **Never break the 4–8 player constraint.** All game logic must handle exactly 4–8 players.
+- **Never hardcode role counts in game logic.** Always call `distributeRoles(n, preset)`. The supported range is `MIN_PLAYERS` (4) to `MAX_PLAYERS` (16).
 - **Never show one player's secret information to another.** Role reveals, investigation results, and Mafia identity are private. The Supabase broadcast must target the correct player(s).
 
 <!-- STRATOS-AUTOBUILDER:BEGIN -->

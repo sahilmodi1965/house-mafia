@@ -14,6 +14,7 @@ export default {
     'Once per Night, investigate one player and learn whether they are Mafia.',
   spawnWeight: 1,
   minPlayers: 4,
+  nightActionKind: 'investigate',
   nightAction: null,
   dayAction: null,
   onElimination: null,

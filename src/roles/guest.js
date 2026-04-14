@@ -12,6 +12,7 @@ export default {
   description: 'No special powers. Vote correctly by day to eliminate the Mafia.',
   spawnWeight: 1,
   minPlayers: 4,
+  nightActionKind: null,
   nightAction: null,
   dayAction: null,
   onElimination: null,

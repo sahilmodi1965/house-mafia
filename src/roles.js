@@ -15,6 +15,8 @@ import {
   shuffle,
 } from './roles/index.js';
 
+const CORE_ROLE_IDS = new Set(['mafia', 'host', 'guest']);
+
 /**
  * Legacy ROLES object. Keys are SHOUT_CASE ids; values are the registry
  * descriptors, which additively include the original {id, name, emoji, color}
@@ -38,10 +40,22 @@ export const ROLES = {
  * is an array of { id, name } for every OTHER Mafia player.
  *
  * @param {Array<{id: string, name: string}>} playerList
+ * @param {Object} [opts]
+ * @param {string} [opts.preset='classic'] - Role-distribution preset from GAME.ROLE_PRESETS
+ * @param {string[]} [opts.disabledRoles] - Role ids (non-core) the host switched off via settings
  * @returns {Object} Map of playerId → { role, mafiaPartners }
  */
-export function assignRoles(playerList) {
-  const roleSlots = distributeRoles(playerList.length);
+export function assignRoles(playerList, opts = {}) {
+  const preset = opts.preset || 'classic';
+  const disabledRoles = new Set(opts.disabledRoles || []);
+  let roleSlots = distributeRoles(playerList.length, preset);
+  // Settings modal lets the host disable optional roles (detective,
+  // doctor, bodyguard). Core roles (mafia/host/guest) are never
+  // disable-able and are ignored here even if they somehow arrive.
+  // Disabled slots are swapped for guest so the row still sums to N.
+  roleSlots = roleSlots.map((r) =>
+    !CORE_ROLE_IDS.has(r.id) && disabledRoles.has(r.id) ? rolesById.guest : r
+  );
   shuffle(roleSlots);
 
   const shuffledPlayers = shuffle([...playerList]);
