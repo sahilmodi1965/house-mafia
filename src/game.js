@@ -7,6 +7,11 @@ import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 import { showGameOver } from './ui/game-over.js';
+import {
+  resolveMafiaKill as pureResolveMafiaKill,
+  resolveNightKill,
+  checkWinCondition as pureCheckWinCondition,
+} from './engine/resolve.js';
 
 /**
  * Game loop orchestration.
@@ -18,19 +23,8 @@ import { showGameOver } from './ui/game-over.js';
 /** Game state — authoritative on the host's client */
 let gameState = null;
 
-/**
- * Check win conditions after an elimination.
- * @returns {string|null} 'mafia' | 'guests' | null
- */
 function checkWinCondition() {
-  if (!gameState) return null;
-  const alive = gameState.players.filter(p => p.alive);
-  const mafiaAlive = alive.filter(p => p.role.id === 'mafia').length;
-  const nonMafiaAlive = alive.length - mafiaAlive;
-
-  if (mafiaAlive === 0) return 'guests';
-  if (mafiaAlive >= nonMafiaAlive) return 'mafia';
-  return null;
+  return gameState ? pureCheckWinCondition(gameState.players) : null;
 }
 
 /**
@@ -268,38 +262,7 @@ export function startGame({
     return hostRow ? hostRow.id : null;
   }
 
-  /**
-   * Resolve a "kill" from the accumulated mafiaVotes map.
-   * Majority wins. On a tie the FIRST mafia's vote (insertion order)
-   * wins, per the issue spec ("tie = first Mafia's pick"). If no
-   * mafia voted, returns null.
-   */
-  function resolveMafiaKill() {
-    if (mafiaVotes.size === 0) return null;
-    const counts = new Map();
-    for (const targetId of mafiaVotes.values()) {
-      if (!targetId) continue;
-      counts.set(targetId, (counts.get(targetId) || 0) + 1);
-    }
-    if (counts.size === 0) return null;
-
-    // Find the highest count
-    let topCount = 0;
-    for (const c of counts.values()) if (c > topCount) topCount = c;
-
-    // Collect all targets at top count
-    const tied = [];
-    for (const [tid, c] of counts.entries()) if (c === topCount) tied.push(tid);
-
-    if (tied.length === 1) return tied[0];
-
-    // Tie: first mafia's pick (insertion order of mafiaVotes) wins,
-    // as long as that pick is one of the tied targets.
-    for (const targetId of mafiaVotes.values()) {
-      if (targetId && tied.includes(targetId)) return targetId;
-    }
-    return tied[0];
-  }
+  const resolveMafiaKill = () => pureResolveMafiaKill(mafiaVotes);
 
   /**
    * Host-side: record a mafia vote, de-duping per voter.
@@ -562,39 +525,12 @@ export function startGame({
           // Both mitigations run even if the composer disabled the
           // corresponding role — the sets are just empty.
           const killedId = resolveMafiaKill();
-          let eliminatedPlayer = null;
-          if (killedId) {
-            if (nightSaves.has(killedId)) {
-              // Kill blocked by Doctor save. No elimination tonight.
-            } else {
-              // Check if this target was protected by any Bodyguard.
-              // First match wins (typically only one Bodyguard).
-              let protectorId = null;
-              for (const [bgId, protectedId] of nightProtects.entries()) {
-                if (protectedId === killedId) {
-                  const bg = gameState.players.find((p) => p.id === bgId);
-                  if (bg && bg.alive) {
-                    protectorId = bgId;
-                    break;
-                  }
-                }
-              }
-              if (protectorId) {
-                // Bodyguard dies in target's place.
-                const bg = gameState.players.find((p) => p.id === protectorId);
-                if (bg && bg.alive) {
-                  bg.alive = false;
-                  eliminatedPlayer = { id: bg.id, name: bg.name };
-                }
-              } else {
-                const target = gameState.players.find((p) => p.id === killedId);
-                if (target && target.alive) {
-                  target.alive = false;
-                  eliminatedPlayer = { id: target.id, name: target.name };
-                }
-              }
-            }
-          }
+          const eliminatedPlayer = resolveNightKill({
+            killedId,
+            nightSaves,
+            nightProtects,
+            players: gameState.players,
+          });
           gameState.phase = 'night-end';
           channel.send({
             type: 'broadcast',
