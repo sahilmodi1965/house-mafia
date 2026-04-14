@@ -9,6 +9,7 @@ import {
   applyRoomConfig,
 } from './ui/settings-modal.js';
 import { showToast } from './ui/toast.js';
+import { isNameAvailable } from './engine/resolve.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -476,6 +477,30 @@ async function subscribeToRoom(app, onBack) {
         const errorEl = document.getElementById('join-error');
         if (errorEl) errorEl.textContent = `Room is full (${GAME.MAX_PLAYERS}/${GAME.MAX_PLAYERS} players).`;
         reject(new Error('Room full'));
+        return;
+      }
+
+      // Issue #52: name collision check. Build a roster snapshot from
+      // the current presence state and refuse to join if the
+      // requested display name is already taken (case-insensitive).
+      const existingNames = [];
+      for (const key of Object.keys(state)) {
+        const presences = state[key];
+        if (!presences || presences.length === 0) continue;
+        const latest = presences[presences.length - 1];
+        if (latest && !latest.isSpectator && typeof latest.name === 'string') {
+          existingNames.push({ name: latest.name });
+        }
+      }
+      if (!isNameAvailable(currentPlayer.name, existingNames)) {
+        channel.unsubscribe();
+        channel = null;
+        const errorEl = document.getElementById('join-error');
+        if (errorEl) errorEl.textContent = 'That name is taken — try another.';
+        try {
+          showToast('That name is taken — try another.', { type: 'error', duration: 2500 });
+        } catch (_) {}
+        reject(new Error('Name taken'));
         return;
       }
 
