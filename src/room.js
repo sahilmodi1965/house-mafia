@@ -547,6 +547,36 @@ async function subscribeToRoom(app, onBack) {
           const lobbyEl = document.getElementById('screen-lobby');
           if (lobbyEl) renderLobby();
         })
+        .on('broadcast', { event: 'lobby:kick' }, (msg) => {
+          // #56: host has removed a player from the lobby.
+          const payload = (msg && msg.payload) || {};
+          const targetId = payload.targetPlayerId;
+          const targetName = payload.targetName || 'player';
+          const kickerName = payload.kickerName || 'Host';
+          if (!targetId) return;
+
+          // If I'm the one being kicked, tear down and bail.
+          if (currentPlayer && targetId === currentPlayer.id) {
+            try {
+              showToast('You were removed from the room', { type: 'error', duration: 4000 });
+            } catch (_) {}
+            const back = onBackFn;
+            cleanup();
+            if (back) back();
+            return;
+          }
+
+          // Otherwise: remove the kicked player from my local roster
+          // and show an informational toast. The host already removed
+          // the row locally; peers reach this code path.
+          players = players.filter((p) => p.id !== targetId);
+          renderLobby();
+          if (!isHost) {
+            try {
+              showToast(`${kickerName} kicked ${targetName}`, { type: 'info', duration: 2500 });
+            } catch (_) {}
+          }
+        })
         .on('broadcast', { event: 'game:start' }, () => {
           if (isHost) return; // host already triggered startGame locally
           // Spectators (late joiners) stay on the spectator screen and
@@ -627,6 +657,21 @@ function showLobby(app, onBack) {
     : '';
 
   app.innerHTML = `
+    <style>
+      .lobby-kick-btn {
+        margin-left: 0.5rem;
+        background: transparent;
+        border: 1px solid var(--neon-pink, #ff00aa);
+        color: var(--neon-pink, #ff00aa);
+        border-radius: 4px;
+        width: 1.6rem;
+        height: 1.6rem;
+        font-size: 0.9rem;
+        cursor: pointer;
+        vertical-align: middle;
+      }
+      .lobby-kick-btn:hover { background: var(--neon-pink, #ff00aa); color: #fff; }
+    </style>
     <div id="screen-lobby" class="screen active">
       <h1>Lobby</h1>
       <p class="room-code-display">Room Code: <span id="lobby-code">${roomCode}</span></p>
@@ -727,11 +772,54 @@ function renderLobby() {
   }
 
   listEl.innerHTML = players
-    .map(
-      (p) =>
-        `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}</li>`
-    )
+    .map((p) => {
+      // #56: host sees a kick ✕ button next to every non-host,
+      // non-stub player. Host cannot kick themselves. Stubs already
+      // have their own local removal paths and are excluded here.
+      const canKick = isHost && !p.isHost && !p.isStub;
+      const kickBtn = canKick
+        ? `<button class="lobby-kick-btn" data-kick-id="${p.id}" data-kick-name="${p.name}" aria-label="Remove ${p.name}">✕</button>`
+        : '';
+      return `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}${kickBtn}</li>`;
+    })
     .join('');
+
+  // #56: wire kick buttons. Opens a confirm prompt, broadcasts
+  // lobby:kick on confirmation. The kicked client receives the
+  // broadcast and tears down its own session.
+  if (isHost) {
+    const kickButtons = listEl.querySelectorAll('.lobby-kick-btn');
+    kickButtons.forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const targetId = btn.getAttribute('data-kick-id');
+        const targetName = btn.getAttribute('data-kick-name') || '';
+        if (!targetId) return;
+        const ok = window.confirm(`Remove ${targetName}?`);
+        if (!ok) return;
+
+        // Broadcast kick to every client. The target acts on it;
+        // others render a status toast.
+        if (channel && typeof channel.send === 'function') {
+          channel.send({
+            type: 'broadcast',
+            event: 'lobby:kick',
+            payload: {
+              targetPlayerId: targetId,
+              targetName,
+              kickerName: (currentPlayer && currentPlayer.name) || 'Host',
+            },
+          });
+        }
+        // Locally remove from roster + re-render.
+        players = players.filter((p) => p.id !== targetId);
+        renderLobby();
+        try {
+          showToast(`Kicked ${targetName}`, { type: 'info', duration: 2000 });
+        } catch (_) {}
+      });
+    });
+  }
 
   if (isHost) {
     const minRequired = DEV_MODE ? GAME.DEV_MIN_PLAYERS : GAME.MIN_PLAYERS;
