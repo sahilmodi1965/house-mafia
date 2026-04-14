@@ -1,20 +1,22 @@
 // @ts-check
 /**
- * Sprint 2a E2E — multi-client Playwright harness. #100
+ * Hardened multi-client Playwright harness. #113 #114 #115
  *
- * The sprint-1 spec runs everything inside a single browser context with
- * ?dev=1 stubs, which is perfect for covering the phase machine and UI
- * but cannot catch Supabase-wire bugs (presence races, broadcast
- * ordering, private-channel delivery to real peer clients). This spec
- * closes that gap by spawning N independent browser contexts — each is
- * an isolated incognito session — and walking them through a real game
- * against one shared Supabase room.
+ * Spawns 4 real browser contexts against Supabase and walks a full
+ * round to game-over. Every click is deterministic (no random pickers)
+ * and every phase boundary asserts mount-count invariants:
+ *   - showRoleReveal mounted exactly 1 time per page
+ *   - showDayDiscussion mounted at most 1 time per completed Day
+ *   - showVoting mounted exactly 1 time per vote phase
+ *   - Timer warning fires at most 1 time per phase per client
  *
- * Budget: 1 channel, 4 presence slots per run. Free tier is 200
- * concurrent. Safe.
+ * The counters are read via window.__hm_debug__, which the source
+ * increments from its mount entry points (vote.js / day.js / screens.js
+ * / timer.js). The bag is only present when this test addInitScripts
+ * it, so the instrumentation is zero-cost in production.
  *
- * Skip conditions: if VITE_SUPABASE_URL is missing (CI has no secrets),
- * we bail out with a clear reason instead of failing red.
+ * Skip conditions: VITE_SUPABASE_URL missing → test.skip with a clear
+ * reason (CI without secrets).
  */
 
 import { test, expect, chromium } from '@playwright/test';
@@ -26,10 +28,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 function hasSupabaseCreds() {
-  // Prefer process.env (CI), fall back to the local .env file which the
-  // factory's dev loop keeps populated. We only need to KNOW that the
-  // URL is set — the browser bundle reads it from import.meta.env at
-  // build time, so this is just a skip guard.
   if (process.env.VITE_SUPABASE_URL) return true;
   const envPath = resolve(__dirname, '..', '..', '.env');
   if (!existsSync(envPath)) return false;
@@ -41,10 +39,35 @@ function hasSupabaseCreds() {
   }
 }
 
-test.describe.serial('multi-client real-wire', () => {
+/**
+ * Install the window.__hm_debug__ counter bag before any app script runs.
+ * Source modules increment these counters from their mount entry points
+ * (see vote.js / day.js / screens.js / timer.js). The bag is opt-in so
+ * production bundles carry zero cost when this init script is absent.
+ */
+async function installDebugBag(page) {
+  await page.addInitScript(() => {
+    // @ts-ignore — injected into the page global for test observability
+    window.__hm_debug__ = {
+      voteMounts: 0,
+      dayMounts: 0,
+      roleMounts: 0,
+      warningFires: 0,
+    };
+  });
+}
 
-test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
-  test.setTimeout(240_000);
+async function readDebug(page) {
+  return await page.evaluate(() => {
+    // @ts-ignore
+    return { ...(window.__hm_debug__ || {}) };
+  });
+}
+
+test.describe.serial('multi-client real-wire hardened', () => {
+
+test('sprint-3c: hardened multi-client N=4 real-Supabase round (#113 #114 #115)', async () => {
+  test.setTimeout(360_000);
   test.slow();
 
   if (!hasSupabaseCreds()) {
@@ -58,20 +81,26 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
   const contexts = await Promise.all([0, 1, 2, 3].map(() => browser.newContext()));
   const pages = await Promise.all(contexts.map((ctx) => ctx.newPage()));
 
-  // Each page gets its own console-error sink. Fail the test if ANY
-  // page logs an error at any point in the run.
+  // Install the debug counter bag on every page BEFORE the app boots.
+  await Promise.all(pages.map((p) => installDebugBag(p)));
+
   pages.forEach((page, i) => {
     const errs = [];
     page.on('console', (msg) => {
-      if (msg.type() === 'error') errs.push(`[p${i}] ${msg.text()}`);
+      const text = msg.text();
+      if (msg.type() === 'error') errs.push(`[p${i}] ${text}`);
+      // Forward hm-debug traces to the test log so we can see the bug.
+      if (text.includes('[hm-debug]')) {
+        // eslint-disable-next-line no-console
+        console.log(`[p${i} trace] ${text}`);
+      }
     });
     page.on('pageerror', (err) => errs.push(`[p${i}] pageerror: ${err.message}`));
     consoleErrorsByPage.push(errs);
   });
 
   try {
-    // 1. All pages load the title screen. NO ?dev=1 — this test is
-    //    specifically about real multi-client presence, not stubs.
+    // 1. All pages load the title screen.
     await Promise.all(
       pages.map(async (page) => {
         await page.goto('/', { waitUntil: 'load', timeout: 15_000 });
@@ -87,29 +116,14 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
     await host.locator('#btn-do-create').click();
     await expect(host.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
 
-    // #106: Wait for pageA's lobby count to reflect the host presence
-    // track before any peer tries to join. Supabase presence can take a
-    // moment to propagate — querying a room before the host's track()
-    // has settled produces a "Room not found" on the joiner. This wait
-    // turns the handshake race into a deterministic one.
     await expect(host.locator('#lobby-count')).toContainText('1/', { timeout: 8_000 });
-    // Extra cushion for Supabase presence propagation. Not a hack to
-    // hide a real bug — it's the same 500ms grace we'd want in a real
-    // deployment between devices on different networks.
     await host.waitForTimeout(500);
 
-    // 3. Read the room code.
     const roomCode = ((await host.locator('#lobby-code').textContent()) || '').trim();
     expect(roomCode).toMatch(/^[A-Z0-9]{4}$/);
-    console.log(`[multi-client] room code = ${roomCode}`);
+    console.log(`[hardened] room code = ${roomCode}`);
 
-    // 4. Pages 1..3 join the room one after another.
-    //
-    // #106: wrap the join click with a retry loop. If #join-error
-    // surfaces "Room not found" on the first attempt, wait 1s and
-    // retry up to 3 times before giving up. Presence propagation is
-    // asymptotic; a retry window is a stability measure, not a cover
-    // for a real bug.
+    // 3. Pages 1..3 join one after another with retry.
     for (let i = 1; i < pages.length; i++) {
       const p = pages[i];
       await p.locator('#btn-join').click();
@@ -125,12 +139,10 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
           joined = true;
           break;
         } catch (_err) {
-          // Check whether we're looking at a "Room not found" error —
-          // if so, wait and retry. Any other error state is fatal.
           const err = p.locator('#join-error');
           const errText = (await err.textContent().catch(() => '')) || '';
           if (/not found/i.test(errText)) {
-            console.log(`[multi-client] p${i} join retry ${attempt + 1}/3 — room presence not yet propagated`);
+            console.log(`[hardened] p${i} join retry ${attempt + 1}/3`);
             await p.waitForTimeout(1000);
             continue;
           }
@@ -138,24 +150,15 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
         }
       }
       if (!joined) {
-        // One last attempt — let the full 20s visibility wait catch any
-        // slow-but-eventually-successful joins.
         await expect(p.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
       }
     }
 
-    // 5. Every page should see the full 4/16 count once presence
-    //    converges. Give the host a little longer since its render
-    //    waits on the presence-sync callback for all four peers.
     for (const p of pages) {
       await expect(p.locator('#lobby-count')).toHaveText(/^4\//, { timeout: 20_000 });
     }
-    console.log('[multi-client] all 4 pages see 4/16 in lobby');
 
-    // 6a. Host shrinks phase timers via Settings modal so the test
-    //     fits inside its 240s budget even if the round loops once or
-    //     twice (30s night + 40s discuss + 20s vote = 90s/round default;
-    //     15 + 30 + 15 = 60s/round here → 3+ rounds comfortably land).
+    // 4. Host shrinks phase timers: Night 15, Discuss 30, Vote 15.
     await host.locator('#btn-settings').click();
     await expect(host.locator('.settings-modal__overlay')).toBeVisible();
     await host.locator('input[name="nightDuration"][value="15"]').check();
@@ -164,119 +167,161 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
     await host.locator('#settings-save').click();
     await expect(host.locator('.settings-modal__overlay')).toHaveCount(0);
 
-    // 6b. Host clicks Start Game. The peers should transition to
-    //    role-reveal as the host's game:start broadcast fires.
+    // 5. Host clicks Start Game.
     await host.locator('#btn-start-game').click();
 
-    // 7. Wait for every page to reach role-reveal.
-    for (const p of pages) {
-      await expect(p.locator('#screen-role-reveal')).toBeVisible({ timeout: 25_000 });
-    }
-    console.log('[multi-client] all 4 pages on role-reveal');
+    // 6. All pages reach role-reveal (parallel).
+    await Promise.all(
+      pages.map((p) => expect(p.locator('#screen-role-reveal')).toBeVisible({ timeout: 25_000 }))
+    );
 
-    // 8. Click Ready on each page. The ready button on role-reveal
-    //    enables itself a short delay after the role animation settles
-    //    (see ui/screens.js showRoleReveal), so we wait for it to be
-    //    enabled before clicking. Use noWaitAfter=false so Playwright
-    //    settles the click into the event loop.
+    // Role-reveal must be mounted exactly once per page.
+    for (let i = 0; i < pages.length; i++) {
+      const dbg = await readDebug(pages[i]);
+      expect(dbg.roleMounts, `p${i} roleMounts`).toBe(1);
+    }
+
+    // 7. Each page clicks Ready.
     for (const p of pages) {
       const readyBtn = p.locator('#btn-ready');
       await expect(readyBtn).toBeEnabled({ timeout: 10_000 });
       await readyBtn.click();
     }
 
-    // 9. Every page advances to the Night screen once everyone is ready.
-    for (const p of pages) {
-      await expect(p.locator('#screen-night')).toBeVisible({ timeout: 25_000 });
+    // 8. All pages reach Night (parallel). Deterministic click: every
+    //    page clicks the FIRST visible night-btn once. Non-actors won't
+    //    have any buttons and that's fine — the host's timer still
+    //    advances regardless.
+    await Promise.all(
+      pages.map((p) => expect(p.locator('#screen-night')).toBeVisible({ timeout: 25_000 }))
+    );
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i];
+      const btnCount = await p.locator('.night-btn').count().catch(() => 0);
+      if (btnCount > 0) {
+        try {
+          await p.locator('.night-btn').first().click({ timeout: 2000 });
+        } catch (_) {
+          // tolerated — picker races are not the regression under test here
+        }
+      }
     }
-    console.log('[multi-client] all 4 pages on night');
 
-    // 10. Start a per-page auto-clicker. Whenever a page renders a
-    //     night-action picker (.night-btn) OR a vote picker (.vote-btn),
-    //     it clicks the first button. The loop persists across rounds
-    //     because the win condition may take 2+ cycles to converge:
-    //     if actors stop picking, the host's tally sees zero picks,
-    //     nobody dies, and the round loops without advancing state.
-    //
-    //     Fire-and-forget: exits once its own page reaches game-over.
-    //     Tracks the phase it last clicked in (by instance id) so it
-    //     doesn't spam the same tally. Errors from races with phase
-    //     swaps are swallowed — they're expected.
-    const nightClickers = pages.map((p, idx) => (async () => {
-      let lastNightClickedRound = -1;
-      let lastVoteClickedRound = -1;
-      let roundCursor = 0;
-      let prevPhase = null;
+    // 9. All pages reach Day Discuss when host resolves Night. Wait on
+    //    pages in parallel so the #113 timer-tick check below runs while
+    //    the phase is still live on all 4 clients.
+    await Promise.all(
+      pages.map((p) => expect(p.locator('#screen-day-discuss')).toBeVisible({ timeout: 90_000 }))
+    );
+
+    // #113 assertion: on every page, #day-timer-container .timer must
+    // show a number that is STRICTLY less than the configured discussion
+    // duration within 4 seconds of phase entry. If the peer's timer
+    // never ticks, this fails — that's the bug #113 regression gate.
+    await Promise.all(
+      pages.map(async (p, i) => {
+        // Give the host's first phase:tick up to 4s to deliver. We poll
+        // instead of waitForTimeout so we catch the tick immediately.
+        const deadline = Date.now() + 4000;
+        let lastText = '';
+        while (Date.now() < deadline) {
+          lastText = ((await p.locator('#day-timer-container .timer').first().textContent().catch(() => '')) || '').trim();
+          const parsed = parseInt(lastText, 10);
+          if (Number.isFinite(parsed) && parsed < 30) return;
+          await p.waitForTimeout(250);
+        }
+        expect(false, `p${i} day timer stuck at "${lastText}" (expected <30 within 4s)`).toBe(true);
+      })
+    );
+
+    // 10. Kick off a per-page click pump that deterministically votes
+    //     for the FIRST vote button as soon as each vote phase renders.
+    //     No randomness, no retries inside the vote phase — one click
+    //     per voteMounts increment so stale listeners can't re-trigger
+    //     votes. The pump exits when #screen-game-over appears.
+    const clickPump = pages.map((p, idx) => (async () => {
+      let clickedVoteCursor = 0;
+      let clickedNightCursor = 0;
       /* eslint-disable no-constant-condition */
       while (true) {
-        if (await p.locator('#screen-game-over').isVisible().catch(() => false)) {
-          return;
-        }
-        // Bump a logical "round cursor" every time the observed phase
-        // flips back into Night or Vote from somewhere else. This
-        // prevents us from re-clicking within the same tally window
-        // (which would just overwrite a pick we already made).
-        let phase = null;
-        if (await p.locator('#screen-night').isVisible().catch(() => false)) phase = 'night';
-        else if (await p.locator('#screen-day-vote').isVisible().catch(() => false)) phase = 'vote';
-        else if (await p.locator('#screen-day-discuss').isVisible().catch(() => false)) phase = 'discuss';
+        // Stop as soon as game-over is showing.
+        const over = await p.locator('#screen-game-over').isVisible().catch(() => false);
+        if (over) return;
 
-        if (phase && phase !== prevPhase) {
-          if (phase === 'night' || phase === 'vote') roundCursor += 1;
-          prevPhase = phase;
-        }
+        // @ts-ignore
+        const counters = await p.evaluate(() => ({ ...(window.__hm_debug__ || {}) }));
+        const voteMounts = counters.voteMounts || 0;
+        const dayMounts = counters.dayMounts || 0; // unused but logged
 
-        if (phase === 'night' && lastNightClickedRound !== roundCursor) {
-          const btns = p.locator('.night-btn');
-          const count = await btns.count().catch(() => 0);
-          if (count > 0) {
-            try {
-              await btns.first().click({ timeout: 1000 });
-              lastNightClickedRound = roundCursor;
-              console.log(`[multi-client] p${idx} clicked night-btn (round ${roundCursor})`);
-            } catch (_) {
-              // retry next tick
+        // Night: click exactly once per visible night phase.
+        if (await p.locator('#screen-night').isVisible().catch(() => false)) {
+          if (clickedNightCursor < dayMounts + 1) {
+            const btnCount = await p.locator('.night-btn').count().catch(() => 0);
+            if (btnCount > 0) {
+              try {
+                await p.locator('.night-btn').first().click({ timeout: 1500 });
+              } catch (_) {}
             }
-          }
-        } else if (phase === 'vote' && lastVoteClickedRound !== roundCursor) {
-          const btns = p.locator('.vote-btn');
-          const count = await btns.count().catch(() => 0);
-          if (count > 0) {
-            try {
-              await btns.first().click({ timeout: 1000 });
-              lastVoteClickedRound = roundCursor;
-              console.log(`[multi-client] p${idx} clicked vote-btn (round ${roundCursor})`);
-            } catch (_) {
-              // retry next tick
-            }
+            clickedNightCursor = dayMounts + 1;
           }
         }
-        await p.waitForTimeout(250);
+
+        // Vote: click exactly once per voteMounts tick.
+        if (await p.locator('#screen-day-vote').isVisible().catch(() => false)) {
+          if (clickedVoteCursor < voteMounts) {
+            const btnCount = await p.locator('.vote-btn').count().catch(() => 0);
+            if (btnCount > 0) {
+              try {
+                await p.locator('.vote-btn').first().click({ timeout: 1500 });
+                console.log(`[hardened] p${idx} vote click, voteMounts=${voteMounts}`);
+              } catch (_) {}
+            }
+            clickedVoteCursor = voteMounts;
+          }
+        }
+
+        await p.waitForTimeout(200);
       }
     })());
 
-    // 11. All four pages must reach Day Discuss once the Night timer
-    //     expires and the host resolves the kill. This is the proof
-    //     that the mafia-kill broadcast reached every client.
+    // 11. Wait for game-over on every page within the test budget.
     for (const p of pages) {
-      await expect(p.locator('#screen-day-discuss')).toBeVisible({ timeout: 90_000 });
+      await expect(p.locator('#screen-game-over')).toBeVisible({ timeout: 220_000 });
     }
-    console.log('[multi-client] all 4 pages reached day-discuss');
+    await Promise.all(clickPump).catch(() => {});
 
-    // 12. The full phase machine must survive to game-over on every
-    //     page within the test budget. With shrunken timers (60s/round)
-    //     we comfortably fit 3+ full cycles inside 200s.
-    for (const p of pages) {
-      await expect(p.locator('#screen-game-over')).toBeVisible({ timeout: 200_000 });
+    // Final invariants — after game-over, the mount counters must be
+    // within sane bounds. dayMounts and voteMounts must each be equal
+    // to the number of completed rounds (1..3 expected), never more.
+    // A voteMounts count > roundsPlayed is the exact symptom of
+    // bug #115 (vote screen re-mount loop on non-host peers).
+    const finalDebugs = [];
+    for (let i = 0; i < pages.length; i++) {
+      const dbg = await readDebug(pages[i]);
+      finalDebugs.push(dbg);
+      console.log(`[hardened] p${i} final debug: ${JSON.stringify(dbg)}`);
+    }
+    // Reference the host's counters as the source of truth for the
+    // number of rounds actually played (host.voteMounts === roundsPlayed).
+    const roundsPlayed = finalDebugs[0].voteMounts || 0;
+    expect(roundsPlayed, 'host rounds played').toBeGreaterThanOrEqual(1);
+    expect(roundsPlayed, 'host rounds played').toBeLessThanOrEqual(3);
+    for (let i = 0; i < pages.length; i++) {
+      const dbg = finalDebugs[i];
+      expect(dbg.roleMounts, `p${i} roleMounts`).toBe(1);
+      // Non-host peers must NEVER re-mount a phase more than the host
+      // played. Equality is the #115 / #113 regression gate.
+      expect(dbg.dayMounts, `p${i} dayMounts must equal roundsPlayed`).toBe(roundsPlayed);
+      expect(dbg.voteMounts, `p${i} voteMounts must equal roundsPlayed`).toBe(roundsPlayed);
+      // Warning fires once per phase per round. 3 phases per round
+      // (night + discuss + vote) × roundsPlayed is the ceiling.
+      expect(
+        dbg.warningFires,
+        `p${i} warningFires must be <= 3 * roundsPlayed`
+      ).toBeLessThanOrEqual(3 * roundsPlayed);
     }
 
-    // Drain the night-clicker tasks so they don't leak past the test.
-    await Promise.all(nightClickers).catch(() => {});
-    console.log('[multi-client] all 4 pages reached game-over');
-
-    // Winner consistency across clients — the .game-over__banner
-    // text must match on every page. If the end-game broadcast lost
-    // a peer, this catches it.
+    // Winner consistency across clients.
     const banners = await Promise.all(
       pages.map(async (p) => ((await p.locator('.game-over__banner').first().textContent()) || '').trim())
     );
@@ -284,39 +329,21 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
     for (let i = 1; i < banners.length; i++) {
       expect(banners[i], `page ${i} banner mismatch`).toBe(first);
     }
-    console.log(`[multi-client] all pages show banner = "${first}"`);
 
-    // Finally: no console errors on any page across the whole run.
+    // No console errors on any page.
     const allErrs = consoleErrorsByPage.flat();
     expect(
       allErrs,
-      `console errors during multi-client round:\n${allErrs.join('\n')}`
+      `console errors during hardened multi-client round:\n${allErrs.join('\n')}`
     ).toHaveLength(0);
   } finally {
-    // #106: give each page a moment for Supabase to flush presence
-    // untrack events before closing the context. Without this, the
-    // next test run can still see ghost presence entries on the room
-    // from the previous run, which is exactly what produced the
-    // "Room not found" flake on repeat runs.
     for (const page of pages) {
-      try {
-        await page.waitForTimeout(1000);
-      } catch (_) {
-        // ignore
-      }
+      try { await page.waitForTimeout(1000); } catch (_) {}
     }
     for (const ctx of contexts) {
-      try {
-        await ctx.close();
-      } catch (_) {
-        // ignore
-      }
+      try { await ctx.close(); } catch (_) {}
     }
-    try {
-      await browser.close();
-    } catch (_) {
-      // ignore
-    }
+    try { await browser.close(); } catch (_) {}
   }
 });
 
