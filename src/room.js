@@ -9,6 +9,7 @@ import {
   applyRoomConfig,
 } from './ui/settings-modal.js';
 import { showToast } from './ui/toast.js';
+import { qrImage } from './ui/qr.js';
 import { isNameAvailable, playAgainResetPlayers } from './engine/resolve.js';
 
 /**
@@ -518,6 +519,11 @@ async function subscribeToRoom(app, onBack) {
     function attachHandlers() {
       channel
         .on('presence', { event: 'sync' }, () => {
+          // #106: presence:sync can fire after cleanup() nulled `channel`
+          // during teardown (Supabase flushes pending events). Guard so
+          // we never call null.presenceState() — dropping the late event
+          // is safe because the room is already gone.
+          if (!channel) return;
           const state = channel.presenceState();
           if (!isHost && !joinerSettled) {
             // Joiner: presence:sync is the authoritative moment to validate the room.
@@ -559,6 +565,21 @@ async function subscribeToRoom(app, onBack) {
           if (currentPlayer && targetId === currentPlayer.id) {
             try {
               showToast('You were removed from the room', { type: 'error', duration: 4000 });
+            } catch (_) {}
+            // #109: strip ?room= from the URL so the main.js auto-join
+            // logic can't immediately bounce the kicked client back into
+            // the Join screen with the room code pre-filled. Also set a
+            // session flag as a defensive guard in case history.replaceState
+            // is delayed or unavailable.
+            try {
+              if (typeof sessionStorage !== 'undefined') {
+                sessionStorage.setItem('hm:just-kicked', '1');
+              }
+            } catch (_) {}
+            try {
+              if (typeof history !== 'undefined' && history.replaceState) {
+                history.replaceState({}, '', window.location.pathname);
+              }
             } catch (_) {}
             const back = onBackFn;
             cleanup();
@@ -616,6 +637,9 @@ async function subscribeToRoom(app, onBack) {
               // Joiner: wait up to 3 s for presence:sync before falling back.
               setTimeout(() => {
                 // If sync already fired and settled, this is a no-op.
+                // #106: guard against channel being nulled by cleanup() in
+                // the intervening 3s (e.g. user navigated away).
+                if (!channel) return;
                 validateJoinerPresence(channel.presenceState());
               }, 3000);
             }
@@ -698,18 +722,37 @@ function showLobby(app, onBack) {
   const shareBtn = document.getElementById('btn-share-room');
   const sharePanel = document.getElementById('share-panel');
   if (shareBtn && sharePanel) {
-    shareBtn.addEventListener('click', () => {
+    shareBtn.addEventListener('click', async () => {
       const url = buildShareUrl(roomCode);
       renderSharePanel(sharePanel, url);
       sharePanel.hidden = false;
-      // Attempt clipboard copy on click; fall back silently if blocked.
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard
-          .writeText(url)
-          .then(() => {
-            try { showToast('Link copied', { type: 'info', duration: 2000 }); } catch (_) {}
-          })
-          .catch(() => {});
+      // #107: share flow must NEVER be silent. Attempt clipboard copy;
+      // on success show "Link copied", on reject (permissions, insecure
+      // context, Safari quirks, rejected promise) show a fallback toast
+      // AND highlight the URL text so the user can long-press / copy
+      // it manually. Either path fires a toast — the broken case from
+      // live testing (no toast at all) cannot happen anymore.
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) {
+          throw new Error('clipboard unavailable');
+        }
+        await navigator.clipboard.writeText(url);
+        try { showToast('Link copied', { type: 'info', duration: 2000 }); } catch (_) {}
+      } catch (_err) {
+        try { showToast('Link ready — tap to copy', { type: 'warn', duration: 3000 }); } catch (_) {}
+        // Select the URL text so a long-press / Cmd+C lifts it off screen.
+        try {
+          const urlEl = document.getElementById('share-panel-url');
+          if (urlEl && typeof document.createRange === 'function' && window.getSelection) {
+            const range = document.createRange();
+            range.selectNodeContents(urlEl);
+            const sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+          }
+        } catch (_) {}
       }
     });
   }
@@ -901,11 +944,10 @@ function buildShareUrl(code) {
 }
 
 /**
- * Issue #48: render the share panel (link text + lazy QR image).
- * Uses the Google Charts QR endpoint — zero dependency, stable URL.
+ * Issue #48 / #108: render the share panel (link text + QR image).
+ * The QR image comes from ui/qr.js — no Google Charts dependency.
  */
 function renderSharePanel(panelEl, url) {
-  const qrSrc = `https://chart.googleapis.com/chart?cht=qr&chs=180x180&chl=${encodeURIComponent(url)}`;
   panelEl.innerHTML = `
     <style>
       .share-panel {
@@ -932,8 +974,10 @@ function renderSharePanel(panelEl, url) {
       }
     </style>
     <div class="share-panel__url" id="share-panel-url">${url}</div>
-    <img class="share-panel__qr" loading="lazy" alt="Room QR code" src="${qrSrc}" />
   `;
+  // #108: append the QR via ui/qr.js so the replacement is a 1-line
+  // swap if the endpoint ever changes again.
+  panelEl.appendChild(qrImage(url));
 }
 
 /**

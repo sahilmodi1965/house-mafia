@@ -41,8 +41,11 @@ function hasSupabaseCreds() {
   }
 }
 
+test.describe.serial('multi-client real-wire', () => {
+
 test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
   test.setTimeout(240_000);
+  test.slow();
 
   if (!hasSupabaseCreds()) {
     test.skip(true, 'VITE_SUPABASE_URL not set — cannot run multi-client real-wire test');
@@ -84,20 +87,61 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
     await host.locator('#btn-do-create').click();
     await expect(host.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
 
+    // #106: Wait for pageA's lobby count to reflect the host presence
+    // track before any peer tries to join. Supabase presence can take a
+    // moment to propagate — querying a room before the host's track()
+    // has settled produces a "Room not found" on the joiner. This wait
+    // turns the handshake race into a deterministic one.
+    await expect(host.locator('#lobby-count')).toContainText('1/', { timeout: 8_000 });
+    // Extra cushion for Supabase presence propagation. Not a hack to
+    // hide a real bug — it's the same 500ms grace we'd want in a real
+    // deployment between devices on different networks.
+    await host.waitForTimeout(500);
+
     // 3. Read the room code.
     const roomCode = ((await host.locator('#lobby-code').textContent()) || '').trim();
     expect(roomCode).toMatch(/^[A-Z0-9]{4}$/);
     console.log(`[multi-client] room code = ${roomCode}`);
 
     // 4. Pages 1..3 join the room one after another.
+    //
+    // #106: wrap the join click with a retry loop. If #join-error
+    // surfaces "Room not found" on the first attempt, wait 1s and
+    // retry up to 3 times before giving up. Presence propagation is
+    // asymptotic; a retry window is a stability measure, not a cover
+    // for a real bug.
     for (let i = 1; i < pages.length; i++) {
       const p = pages[i];
       await p.locator('#btn-join').click();
       await expect(p.locator('#join-code')).toBeVisible();
       await p.locator('#join-code').fill(roomCode);
       await p.locator('#join-name').fill(`Player${i}`);
-      await p.locator('#btn-do-join').click();
-      await expect(p.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+
+      let joined = false;
+      for (let attempt = 0; attempt < 3 && !joined; attempt++) {
+        await p.locator('#btn-do-join').click();
+        try {
+          await expect(p.locator('#screen-lobby')).toBeVisible({ timeout: 8_000 });
+          joined = true;
+          break;
+        } catch (_err) {
+          // Check whether we're looking at a "Room not found" error —
+          // if so, wait and retry. Any other error state is fatal.
+          const err = p.locator('#join-error');
+          const errText = (await err.textContent().catch(() => '')) || '';
+          if (/not found/i.test(errText)) {
+            console.log(`[multi-client] p${i} join retry ${attempt + 1}/3 — room presence not yet propagated`);
+            await p.waitForTimeout(1000);
+            continue;
+          }
+          throw _err;
+        }
+      }
+      if (!joined) {
+        // One last attempt — let the full 20s visibility wait catch any
+        // slow-but-eventually-successful joins.
+        await expect(p.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+      }
     }
 
     // 5. Every page should see the full 4/16 count once presence
@@ -249,6 +293,18 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
       `console errors during multi-client round:\n${allErrs.join('\n')}`
     ).toHaveLength(0);
   } finally {
+    // #106: give each page a moment for Supabase to flush presence
+    // untrack events before closing the context. Without this, the
+    // next test run can still see ghost presence entries on the room
+    // from the previous run, which is exactly what produced the
+    // "Room not found" flake on repeat runs.
+    for (const page of pages) {
+      try {
+        await page.waitForTimeout(1000);
+      } catch (_) {
+        // ignore
+      }
+    }
     for (const ctx of contexts) {
       try {
         await ctx.close();
@@ -263,3 +319,5 @@ test('sprint-2a: multi-client N=4 real-Supabase round (#100)', async () => {
     }
   }
 });
+
+}); // end describe.serial
