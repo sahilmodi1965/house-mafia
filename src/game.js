@@ -6,6 +6,7 @@ import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction, scheduleStubChatter } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
+import { setGameEventHandlers } from './room.js';
 import { showGameOver } from './ui/game-over.js';
 import { showEliminatedSpectator } from './phases/spectator.js';
 import {
@@ -14,6 +15,7 @@ import {
   checkWinCondition as pureCheckWinCondition,
   shouldDelayEndNight,
 } from './engine/resolve.js';
+import { buildGameSummary, saveGameSummary } from './engine/history.js';
 import { showToast } from './ui/toast.js';
 
 /**
@@ -74,6 +76,12 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
       discussionEnded = true;
       for (const h of chatterTimers) clearTimeout(h);
       chatterTimers.length = 0;
+      // #50: tear down the chat widget before the screen flips to
+      // voting so its broadcast listener doesn't leak into the next
+      // phase's DOM.
+      try {
+        if (dayHandle && dayHandle.destroyChat) dayHandle.destroyChat();
+      } catch (_) {}
       if (isHost) {
         startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom });
       }
@@ -127,6 +135,20 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
  * @param {Function} opts.onReturnToTitle - Called when the player leaves to title
  */
 function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom }) {
+  // #51: write the finished game to the per-device history store
+  // before the screen flips. Pulls roomCode / startedAt / elimination
+  // tracking off gameState if the host set them (non-host clients
+  // only have the player list + winner — still worth recording).
+  try {
+    const summarySource = gameState && typeof gameState === 'object'
+      ? { ...gameState, players }
+      : { players };
+    const summary = buildGameSummary(summarySource, winner, Date.now());
+    saveGameSummary(summary);
+  } catch (err) {
+    console.error('history: failed to save game summary', err);
+  }
+
   showGameOver(app, {
     winner,
     players,
@@ -198,6 +220,16 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, 
       if (result.eliminatedPlayer && isHost) {
         const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
         if (target) target.alive = false;
+        // #51: record the day elimination for the local history
+        // summary. Uses the same round number the night tick just
+        // incremented on the host.
+        if (gameState && Array.isArray(gameState.dayEliminations)) {
+          gameState.dayEliminations.push({
+            round: gameState.roundNumber || 0,
+            targetName: result.eliminatedPlayer.name,
+            voteCount: typeof result.voteCount === 'number' ? result.voteCount : null,
+          });
+        }
       }
 
       // #49: if the local player died in this vote, route to the
@@ -660,6 +692,25 @@ export function startGame({
             nightProtects,
             players: gameState.players,
           });
+          // #51: record the night elimination for history. Also bump
+          // the round counter so day eliminations below share the
+          // same round index.
+          gameState.roundNumber = (gameState.roundNumber || 0) + 1;
+          if (eliminatedPlayer) {
+            gameState.nightEliminations.push({
+              round: gameState.roundNumber,
+              targetName: eliminatedPlayer.name,
+              savedByDoctor: false,
+            });
+          } else if (killedId) {
+            // The mafia picked a target but it was blocked by a save.
+            const savedPlayer = gameState.players.find((p) => p.id === killedId);
+            gameState.nightEliminations.push({
+              round: gameState.roundNumber,
+              targetName: savedPlayer ? savedPlayer.name : 'unknown',
+              savedByDoctor: true,
+            });
+          }
           gameState.phase = 'night-end';
           channel.send({
             type: 'broadcast',
@@ -785,6 +836,72 @@ export function startGame({
   hostStartNextNight = () => startNightPhase();
   _eliminatedSpectatorCheck = (nextPlayers) => maybeRouteToEliminatedSpectator(nextPlayers);
 
+  // #33/#34: register presence-event handlers with room.js. The host
+  // re-delivers state on reconnect via the peer's private channel;
+  // any client can be promoted when host migration fires; and if no
+  // successor is viable we tear down the game loop.
+  setGameEventHandlers({
+    onPlayerReconnected: async (player) => {
+      if (!isHost || !player || !player.id || !gameState) return;
+      const roleData = gameState.roles ? gameState.roles[player.id] : null;
+      if (!roleData) return;
+      try {
+        const sendChannel = await subscribeToPrivate(supabase, roomCode, player.id);
+        peerPrivateChannels.set(player.id, sendChannel);
+        await sendChannel.send({
+          type: 'broadcast',
+          event: 'game:state-snapshot',
+          payload: {
+            phase: gameState.phase,
+            players: gameState.players,
+            currentPlayerRole: roleData.role,
+            currentPlayerMafiaPartners: roleData.mafiaPartners || [],
+          },
+        });
+      } catch (err) {
+        console.error('Host: failed to deliver state snapshot on reconnect', err);
+      }
+    },
+    onHostMigration: ({ newHostId, players: migratedPlayers }) => {
+      // Deterministic: every client ran selectNextHost on the same
+      // roster. The elected new host flips its own isHost flag and
+      // takes over the game loop; everyone else just refreshes their
+      // local view. If the new host is THIS client, we re-run the
+      // core host-side setup we can without re-issuing roles.
+      if (Array.isArray(migratedPlayers) && gameState) {
+        gameState.players = migratedPlayers;
+      }
+      if (currentPlayer && currentPlayer.id === newHostId) {
+        isHost = true;
+        // Best-effort re-broadcast of current phase so peers re-sync
+        // their screen even if they dropped a frame during the
+        // migration gap. Uses the public channel (no secrets here).
+        if (gameState && channel) {
+          try {
+            channel.send({
+              type: 'broadcast',
+              event: 'phase:night-start',
+              payload: {
+                players: gameState.players.map((p) => ({
+                  id: p.id,
+                  name: p.name,
+                  alive: p.alive,
+                  isStub: !!p.isStub,
+                })),
+              },
+            });
+          } catch (_) {}
+        }
+      }
+    },
+    onHostGone: () => {
+      // Game is dead. Hand control back to the caller, which will
+      // take the local client back to title.
+      gameState = null;
+      if (onReturnToTitle) onReturnToTitle();
+    },
+  });
+
   // Handle this player's role assignment. It arrives on their OWN private
   // channel. The shared `channel` never carries role data.
   const handleRoleAssign = (payload) => {
@@ -804,6 +921,30 @@ export function startGame({
   };
 
   if (privateChannel) {
+    // #33: state-snapshot re-delivery for reconnecting players. The
+    // host sends one of these on the reconnecter's private channel
+    // when presence:join fires for a previously-disconnected seat.
+    privateChannel.on('broadcast', { event: 'game:state-snapshot' }, (msg) => {
+      const payload = (msg && msg.payload) || {};
+      if (payload.currentPlayerRole) {
+        currentRoleData = {
+          role: payload.currentPlayerRole,
+          mafiaPartners: payload.currentPlayerMafiaPartners || [],
+        };
+      }
+      if (Array.isArray(payload.players)) {
+        nightPlayerList = payload.players;
+        if (gameState) {
+          gameState.players = payload.players;
+        } else {
+          gameState = { phase: payload.phase || 'running', players: payload.players, roles: {} };
+        }
+      }
+      try {
+        showToast('Reconnected — restoring state', { type: 'info', duration: 2500 });
+      } catch (_) {}
+    });
+
     // Drain any role:assign buffered by curator.subscribeToPrivate before
     // this listener was attached (avoids host-sends-before-joiner-listens
     // race).
@@ -987,6 +1128,9 @@ export function startGame({
     const stubPlayers = DEV_MODE ? players.filter(p => p.isStub) : [];
 
     // Initialize game state on host
+    // #51: seed roomCode/startedAt/elimination arrays for the history
+    // summary written on transitionToGameOver. Host is authoritative
+    // on these; non-host clients use an empty fallback.
     gameState = {
       phase: 'role-reveal',
       players: players.map((p) => ({
@@ -997,6 +1141,11 @@ export function startGame({
         isStub: !!p.isStub,
       })),
       roles: assignments,
+      roomCode,
+      startedAt: Date.now(),
+      nightEliminations: [],
+      dayEliminations: [],
+      roundNumber: 0,
     };
 
     // Publish each REAL player's role on THAT player's private channel.

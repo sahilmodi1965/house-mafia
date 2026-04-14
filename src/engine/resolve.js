@@ -172,6 +172,79 @@ export function playAgainResetPlayers(players) {
 }
 
 /**
+ * Issue #33: decide whether a disconnected seat should still be held open
+ * for possible reconnect, or evicted now because the grace window has
+ * expired. Pure — no Date.now() and no timers. The caller supplies nowMs.
+ *
+ * Rules:
+ *   - keep=true + remainingMs=graceMs when disconnectedAt is missing/falsy
+ *     (fail-safe: treat as "just dropped")
+ *   - keep=true + remainingMs=graceMs when nowMs < disconnectedAt
+ *     (clock skew — fail safe, don't evict)
+ *   - keep=true + remainingMs=(graceMs - elapsed) when elapsed < graceMs
+ *   - keep=false + remainingMs=0 when elapsed >= graceMs (strictly less)
+ *
+ * @param {Object} opts
+ * @param {number} opts.disconnectedAt - ms timestamp when presence:leave fired
+ * @param {number} opts.nowMs - current wall clock in ms
+ * @param {number} opts.graceMs - total grace window in ms
+ * @returns {{ keep: boolean, remainingMs: number }}
+ */
+export function shouldHoldDisconnectedSeat({ disconnectedAt, nowMs, graceMs }) {
+  if (!disconnectedAt || disconnectedAt <= 0) {
+    return { keep: true, remainingMs: graceMs };
+  }
+  if (typeof nowMs !== 'number' || typeof graceMs !== 'number') {
+    return { keep: true, remainingMs: graceMs };
+  }
+  const elapsed = nowMs - disconnectedAt;
+  if (elapsed < 0) {
+    // Clock skew — treat as just-disconnected and give full grace window.
+    return { keep: true, remainingMs: graceMs };
+  }
+  if (elapsed >= graceMs) {
+    return { keep: false, remainingMs: 0 };
+  }
+  return { keep: true, remainingMs: graceMs - elapsed };
+}
+
+/**
+ * Issue #34: deterministically pick the next host after the current host
+ * disconnects. All clients run this on the same presence snapshot and
+ * converge on the same successor.
+ *
+ * Rules:
+ *   - Skip the current host (leavingHostId)
+ *   - Skip dead players (alive === false)
+ *   - Skip stubs (isStub === true)
+ *   - Skip anyone with disconnectedAt set (they are also offline)
+ *   - Return the earliest-joined remaining player's id (sort by joinedAt)
+ *   - Return null if no viable replacement exists
+ *
+ * @param {Array<{id:string, joinedAt?:number, alive?:boolean, isStub?:boolean, disconnectedAt?:number}>} players
+ * @param {string} leavingHostId
+ * @returns {string|null}
+ */
+export function selectNextHost(players, leavingHostId) {
+  if (!Array.isArray(players) || players.length === 0) return null;
+  const candidates = players.filter((p) => {
+    if (!p || typeof p.id !== 'string') return false;
+    if (p.id === leavingHostId) return false;
+    if (p.alive === false) return false;
+    if (p.isStub === true) return false;
+    if (p.disconnectedAt && p.disconnectedAt > 0) return false;
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    const aj = typeof a.joinedAt === 'number' ? a.joinedAt : Number.POSITIVE_INFINITY;
+    const bj = typeof b.joinedAt === 'number' ? b.joinedAt : Number.POSITIVE_INFINITY;
+    return aj - bj;
+  });
+  return candidates[0].id;
+}
+
+/**
  * Evaluate win conditions from the current player snapshot.
  *   - 'guests' if no living Mafia
  *   - 'mafia'  if living Mafia count >= living non-Mafia count

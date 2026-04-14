@@ -4,6 +4,7 @@ import { DEV_MODE } from '../dev.js';
 import { playSound } from '../audio.js';
 import { haptic, HAPTIC_ELIMINATE } from '../haptic.js';
 import { showToast } from '../ui/toast.js';
+import { createChatWidget } from '../ui/chat.js';
 
 /**
  * Day discussion phase.
@@ -102,10 +103,22 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
       ${announcementHTML}
       <div id="day-timer-container"></div>
       ${devChatterHTML}
+      <div id="day-chat-slot"></div>
       <ul class="day-player-list" id="day-player-list"></ul>
       ${!isAlive ? '<p class="day-chat__spectator">You are eliminated. Spectating.</p>' : ''}
     </div>
   `;
+
+  // #50: mount the real in-game chat widget below the dev-chatter
+  // strip. The widget handles its own broadcast + profanity scrub and
+  // auto-disables input for eliminated/spectator clients.
+  const chatSlot = document.getElementById('day-chat-slot');
+  const chatWidget = createChatWidget({
+    channel,
+    currentPlayer,
+    isAlive,
+  });
+  if (chatSlot) chatSlot.appendChild(chatWidget.el);
 
   // Timer
   const timerContainer = document.getElementById('day-timer-container');
@@ -305,5 +318,13 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
   // #102: expose dev-chatter append handle to the caller so game.js
   // can push stub chatter lines during Discussion. Returns an empty
   // shape in non-dev builds so existing callers don't break.
-  return { appendChatter };
+  // #50: also expose destroyChat so game.js can tear down the chat
+  // widget on phase exit (it detaches the listener guard and removes
+  // the DOM).
+  return {
+    appendChatter,
+    destroyChat: () => {
+      try { chatWidget.destroy(); } catch (_) {}
+    },
+  };
 }

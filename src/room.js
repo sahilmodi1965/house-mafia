@@ -10,7 +10,12 @@ import {
 } from './ui/settings-modal.js';
 import { showToast } from './ui/toast.js';
 import { qrImage } from './ui/qr.js';
-import { isNameAvailable, playAgainResetPlayers } from './engine/resolve.js';
+import {
+  isNameAvailable,
+  playAgainResetPlayers,
+  shouldHoldDisconnectedSeat,
+  selectNextHost,
+} from './engine/resolve.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -37,6 +42,31 @@ let lastNonHostSeenAt = 0;
 // mutations (applyRoomConfig). Peers populate it from lobby:config
 // broadcasts so their lobby UI reflects the host's picks.
 let roomConfig = defaultRoomConfig();
+// #33/#34: map of playerId → { timeoutId, disconnectedAt } used to track
+// held-open seats for reconnect. Cleared when the player rejoins, fires
+// when the grace window expires (and the seat gets evicted / host
+// migration runs).
+const pendingEvictions = new Map();
+// Callback registered by game.js so the room module can hand off a
+// reconnecting player (state restoration) without importing game.js
+// directly. Null while no game is in progress.
+let onPlayerReconnectedFn = null;
+// Callback registered by game.js so the room module can hand off host
+// migration events.
+let onHostMigrationFn = null;
+// Callback registered by game.js to wipe client-side game state when
+// the host is unreachable and no successor is viable.
+let onHostGoneFn = null;
+
+/**
+ * Register/unregister game.js callbacks for presence events that
+ * affect the active game loop. Safe to call with null to detach.
+ */
+export function setGameEventHandlers({ onPlayerReconnected, onHostMigration, onHostGone } = {}) {
+  onPlayerReconnectedFn = onPlayerReconnected || null;
+  onHostMigrationFn = onHostMigration || null;
+  onHostGoneFn = onHostGone || null;
+}
 
 /** Inject the singleton Supabase client */
 export function setSupabase(client) {
@@ -199,7 +229,16 @@ function stopRoomGC() {
 function syncPlayers(state) {
   // Preserve local stub players across Supabase presence syncs
   const stubs = players.filter(p => p.isStub);
-  players = [];
+  // #33: preserve held-open seats for players whose presence vanished
+  // but whose reconnect grace window is still active. These will show
+  // up as a "(reconnecting…)" row in the lobby UI until they come back
+  // or their grace expires.
+  const heldSeats = players.filter(
+    (p) => !p.isStub && p.disconnectedAt && pendingEvictions.has(p.id)
+  );
+
+  const nextPlayers = [];
+  const seenIds = new Set();
   for (const key of Object.keys(state)) {
     const presences = state[key];
     if (presences && presences.length > 0) {
@@ -208,13 +247,133 @@ function syncPlayers(state) {
       // Spectators (late joiners) are tracked on the same channel but
       // must not appear in the lobby player roster — issue #35.
       if (latest && latest.isSpectator) continue;
-      players.push(latest);
+      // joinedAt: record when we first saw this seat so selectNextHost
+      // can sort by joinedAt deterministically.
+      const existing = players.find((p) => p.id === latest.id);
+      const joinedAt = existing && existing.joinedAt ? existing.joinedAt : Date.now();
+      nextPlayers.push({ ...latest, joinedAt, disconnectedAt: null });
+      seenIds.add(latest.id);
     }
+  }
+  // Re-append any held seats the presence state no longer shows.
+  for (const held of heldSeats) {
+    if (!seenIds.has(held.id)) nextPlayers.push(held);
   }
   // Re-append stubs (they are local-only, not in Supabase presence)
   for (const stub of stubs) {
-    players.push(stub);
+    nextPlayers.push(stub);
   }
+  players = nextPlayers;
+  renderLobby();
+}
+
+/**
+ * #33: mark a player's seat as disconnected (held open) and schedule
+ * its eviction after the grace window. If the player rejoins in time
+ * (presence join), clearPendingEviction is called first so the timer
+ * never fires.
+ */
+function markSeatDisconnected(playerId) {
+  if (!playerId) return;
+  // If there's already a pending eviction for this seat, restart it.
+  clearPendingEviction(playerId);
+  const player = players.find((p) => p.id === playerId);
+  if (!player) return;
+  if (player.isStub) return; // stubs never use presence
+
+  const disconnectedAt = Date.now();
+  player.disconnectedAt = disconnectedAt;
+
+  const timeoutId = setTimeout(() => {
+    const decision = shouldHoldDisconnectedSeat({
+      disconnectedAt,
+      nowMs: Date.now(),
+      graceMs: GAME.RECONNECT_GRACE_MS,
+    });
+    if (!decision.keep) {
+      evictDisconnectedSeat(playerId);
+    } else {
+      // Clock-skew fail-safe: re-arm for the remaining window.
+      pendingEvictions.set(
+        playerId,
+        setTimeout(() => evictDisconnectedSeat(playerId), decision.remainingMs)
+      );
+    }
+  }, GAME.RECONNECT_GRACE_MS);
+  pendingEvictions.set(playerId, timeoutId);
+  renderLobby();
+}
+
+function clearPendingEviction(playerId) {
+  const t = pendingEvictions.get(playerId);
+  if (t) clearTimeout(t);
+  pendingEvictions.delete(playerId);
+}
+
+/**
+ * #33: actually remove a held-open seat from the local roster and
+ * re-render. If the evicted seat was the game host, run the host
+ * migration flow (#34) deterministically on every client.
+ */
+function evictDisconnectedSeat(playerId) {
+  pendingEvictions.delete(playerId);
+  const evicted = players.find((p) => p.id === playerId);
+  if (!evicted) return;
+
+  // #34: host migration path. Every client runs selectNextHost locally
+  // on the same roster, so the outcome converges without a central
+  // authority. The new host flips its local isHost flag and kicks off
+  // state reconstruction via onHostMigrationFn.
+  if (evicted.isHost) {
+    const nextId = selectNextHost(players, playerId);
+    players = players.filter((p) => p.id !== playerId);
+    renderLobby();
+
+    if (!nextId) {
+      // No viable replacement — the game is dead. Surface to the user
+      // and hand control back to game.js (or the lobby) via callback.
+      try {
+        showToast('Host disconnected — game ended.', { type: 'error', duration: 4000 });
+      } catch (_) {}
+      if (onHostGoneFn) {
+        try { onHostGoneFn(); } catch (err) { console.error('onHostGone handler threw', err); }
+      }
+      return;
+    }
+
+    // Promote the local client if we're the chosen successor.
+    if (currentPlayer && currentPlayer.id === nextId) {
+      isHost = true;
+      currentPlayer = { ...currentPlayer, isHost: true };
+      try {
+        showToast('You are now the host', { type: 'info', duration: 3500 });
+      } catch (_) {}
+      // Re-track presence with the new host flag so peers see the
+      // promotion on their next sync.
+      if (channel && typeof channel.track === 'function') {
+        try { channel.track(currentPlayer); } catch (_) {}
+      }
+    } else {
+      try {
+        const newHost = players.find((p) => p.id === nextId);
+        const label = (newHost && newHost.name) || 'New host';
+        showToast(`${label} is the new host`, { type: 'info', duration: 3500 });
+      } catch (_) {}
+    }
+
+    if (onHostMigrationFn) {
+      try {
+        onHostMigrationFn({ newHostId: nextId, leavingHostId: playerId, players: [...players] });
+      } catch (err) {
+        console.error('onHostMigration handler threw', err);
+      }
+    }
+    renderLobby();
+    return;
+  }
+
+  // Plain player eviction — just drop the seat.
+  players = players.filter((p) => p.id !== playerId);
   renderLobby();
 }
 
@@ -533,11 +692,58 @@ async function subscribeToRoom(app, onBack) {
             syncPlayers(state);
           }
         })
-        .on('presence', { event: 'join' }, () => {
-          // Handled by sync
+        .on('presence', { event: 'join' }, ({ key, newPresences }) => {
+          // #33: a player (re)joined. If we were holding their seat
+          // open, clear the pending eviction and restore the row. If a
+          // game is in progress and game.js registered a reconnect
+          // handler, hand off state restoration.
+          if (!key) return;
+          const rejoined = players.find((p) => p.id === key);
+          const wasDisconnected = rejoined && rejoined.disconnectedAt;
+          clearPendingEviction(key);
+          if (rejoined) {
+            rejoined.disconnectedAt = null;
+          }
+          if (wasDisconnected) {
+            try {
+              const label = (rejoined && rejoined.name) || 'player';
+              showToast(`${label} reconnected`, { type: 'info', duration: 2500 });
+            } catch (_) {}
+            renderLobby();
+            // State restoration hook: only the host re-delivers the
+            // current phase + role snapshot on the reconnecter's
+            // private channel. Non-host clients no-op.
+            if (isHost && onPlayerReconnectedFn) {
+              try {
+                const latest = (newPresences && newPresences[0]) || rejoined;
+                onPlayerReconnectedFn(latest);
+              } catch (err) {
+                console.error('onPlayerReconnected handler threw', err);
+              }
+            }
+          }
         })
-        .on('presence', { event: 'leave' }, () => {
-          // Handled by sync
+        .on('presence', { event: 'leave' }, ({ key }) => {
+          // #33: do NOT immediately drop the player. Mark their seat
+          // as disconnected, keep the row visible as
+          // "(reconnecting…)", and schedule eviction after the grace
+          // window. If they come back via the 'join' handler above,
+          // the timer is cleared and the seat is restored.
+          if (!key) return;
+          // Ignore leave events for our OWN presence key. Supabase
+          // fires a leave any time a client re-calls channel.track()
+          // (which we do on game start, settings save, and host
+          // promotion). Our own client never "leaves" from its own
+          // perspective — any leave for our id is a retrack artifact
+          // and must not trigger the disconnect grace window (that
+          // would otherwise evict ourselves 30s later and, if we are
+          // the host, run selectNextHost → null → onHostGone →
+          // return-to-title mid-game).
+          if (currentPlayer && key === currentPlayer.id) return;
+          const leaving = players.find((p) => p.id === key);
+          if (!leaving) return;
+          if (leaving.isSpectator) return; // spectators just evaporate
+          markSeatDisconnected(key);
         })
         .on('broadcast', { event: 'lobby:config' }, (msg) => {
           // Issue #54: host has updated game settings. Peers mirror
@@ -823,7 +1029,13 @@ function renderLobby() {
       const kickBtn = canKick
         ? `<button class="lobby-kick-btn" data-kick-id="${p.id}" data-kick-name="${p.name}" aria-label="Remove ${p.name}">✕</button>`
         : '';
-      return `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}${kickBtn}</li>`;
+      // #33: show "(reconnecting…)" on held-open seats whose grace
+      // window is still ticking. Rendered in neon yellow so the
+      // disconnect is visible at a glance.
+      const reconnecting = p.disconnectedAt
+        ? ' <span class="player-reconnecting" data-reconnecting="1">(reconnecting…)</span>'
+        : '';
+      return `<li class="player-item">${p.name}${p.isHost ? ' <span class="host-badge">HOST</span>' : ''}${p.isStub ? ' <span class="stub-badge">STUB</span>' : ''}${reconnecting}${kickBtn}</li>`;
     })
     .join('');
 
@@ -1013,6 +1225,15 @@ function restartRoomInPlace() {
 
 function cleanup() {
   stopRoomGC();
+  // #33: clear any pending eviction timers so they can't fire into a
+  // disposed room and null-deref channel references.
+  for (const t of pendingEvictions.values()) {
+    try { clearTimeout(t); } catch (_) {}
+  }
+  pendingEvictions.clear();
+  onPlayerReconnectedFn = null;
+  onHostMigrationFn = null;
+  onHostGoneFn = null;
   if (channel) {
     channel.unsubscribe();
     channel = null;

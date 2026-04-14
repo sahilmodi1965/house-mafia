@@ -483,6 +483,17 @@ h1 {
   opacity: 0.8;
 }
 
+/* #33: held-open seat indicator. Shown next to a player's name while
+   their reconnect grace window is still ticking. */
+.player-reconnecting {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--neon-yellow, #ffdd00);
+  margin-left: 0.4rem;
+  font-style: italic;
+  opacity: 0.85;
+}
+
 /* --- Game-over screen --- */
 
 .game-over__banner {

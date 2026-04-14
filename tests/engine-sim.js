@@ -34,7 +34,11 @@ import {
   shouldDelayEndNight,
   isNameAvailable,
   playAgainResetPlayers,
+  shouldHoldDisconnectedSeat,
+  selectNextHost,
 } from '../src/engine/resolve.js';
+import { filterProfanity, PROFANITY_LIST } from '../src/engine/chat-filter.js';
+import { buildGameSummary, saveGameSummary, loadGameHistory, clearGameHistory } from '../src/engine/history.js';
 
 // ---------------------------------------------------------------- harness
 
@@ -548,6 +552,293 @@ section('7. Lobby + restart logic (pure)');
 }
 {
   assertEq(playAgainResetPlayers([]), [], 'playAgainResetPlayers: handles empty array');
+}
+
+// ---------------------------------------------------------------- 7b. shouldHoldDisconnectedSeat (#33)
+
+section('7b. shouldHoldDisconnectedSeat — presence grace window (#33)');
+
+{
+  const GRACE = 30000;
+  // Fresh disconnect → keep with full grace remaining
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 1000, nowMs: 1000, graceMs: GRACE }),
+    { keep: true, remainingMs: 30000 },
+    'hold-seat: fresh disconnect (elapsed=0) → keep with full grace'
+  );
+
+  // 10s ago → keep with 20s remaining
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 1000, nowMs: 11000, graceMs: GRACE }),
+    { keep: true, remainingMs: 20000 },
+    'hold-seat: 10s elapsed → keep with 20s remaining'
+  );
+
+  // 35s ago → evict
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 1000, nowMs: 36000, graceMs: GRACE }),
+    { keep: false, remainingMs: 0 },
+    'hold-seat: 35s elapsed → evict'
+  );
+
+  // Exact boundary → evict (>= is eviction)
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 1000, nowMs: 31000, graceMs: GRACE }),
+    { keep: false, remainingMs: 0 },
+    'hold-seat: exact boundary (elapsed === graceMs) → evict'
+  );
+
+  // One ms before boundary → keep
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 1000, nowMs: 30999, graceMs: GRACE }),
+    { keep: true, remainingMs: 1 },
+    'hold-seat: one ms before boundary → keep'
+  );
+
+  // Clock skew (nowMs < disconnectedAt) → fail-safe keep with full grace
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 5000, nowMs: 1000, graceMs: GRACE }),
+    { keep: true, remainingMs: 30000 },
+    'hold-seat: clock skew → fail-safe keep'
+  );
+
+  // Missing disconnectedAt → fail-safe keep
+  assertEq(
+    shouldHoldDisconnectedSeat({ disconnectedAt: 0, nowMs: 1000, graceMs: GRACE }),
+    { keep: true, remainingMs: 30000 },
+    'hold-seat: missing disconnectedAt → fail-safe keep'
+  );
+}
+
+// ---------------------------------------------------------------- 7c. selectNextHost (#34)
+
+section('7c. selectNextHost — deterministic host migration (#34)');
+
+{
+  // Normal case — 4 players, host drops, earliest-joined remaining becomes host
+  const players = [
+    { id: 'host1', joinedAt: 1000, alive: true },
+    { id: 'p2', joinedAt: 2000, alive: true },
+    { id: 'p3', joinedAt: 3000, alive: true },
+    { id: 'p4', joinedAt: 4000, alive: true },
+  ];
+  assertEq(selectNextHost(players, 'host1'), 'p2', 'next-host: normal case → earliest remaining');
+}
+
+{
+  // Dead players skipped
+  const players = [
+    { id: 'host1', joinedAt: 1000, alive: true },
+    { id: 'p2', joinedAt: 2000, alive: false },
+    { id: 'p3', joinedAt: 3000, alive: true },
+    { id: 'p4', joinedAt: 4000, alive: true },
+  ];
+  assertEq(selectNextHost(players, 'host1'), 'p3', 'next-host: dead player skipped');
+}
+
+{
+  // Stubs skipped
+  const players = [
+    { id: 'host1', joinedAt: 1000, alive: true },
+    { id: 'p2', joinedAt: 2000, alive: true, isStub: true },
+    { id: 'p3', joinedAt: 3000, alive: true },
+  ];
+  assertEq(selectNextHost(players, 'host1'), 'p3', 'next-host: stub skipped');
+}
+
+{
+  // All remaining disconnected → null
+  const players = [
+    { id: 'host1', joinedAt: 1000, alive: true },
+    { id: 'p2', joinedAt: 2000, alive: true, disconnectedAt: 9999 },
+    { id: 'p3', joinedAt: 3000, alive: true, disconnectedAt: 9999 },
+  ];
+  assertEq(selectNextHost(players, 'host1'), null, 'next-host: all remaining disconnected → null');
+}
+
+{
+  // Only host in room → null
+  const players = [{ id: 'host1', joinedAt: 1000, alive: true }];
+  assertEq(selectNextHost(players, 'host1'), null, 'next-host: only host → null');
+}
+
+{
+  // Ordering by joinedAt, not array index (scrambled insertion order)
+  const players = [
+    { id: 'host1', joinedAt: 1000, alive: true },
+    { id: 'late', joinedAt: 5000, alive: true },
+    { id: 'early', joinedAt: 2000, alive: true },
+    { id: 'middle', joinedAt: 3000, alive: true },
+  ];
+  assertEq(selectNextHost(players, 'host1'), 'early', 'next-host: sorted by joinedAt, not array index');
+}
+
+{
+  // Leaving host not in the list → still picks earliest remaining
+  const players = [
+    { id: 'p2', joinedAt: 2000, alive: true },
+    { id: 'p3', joinedAt: 3000, alive: true },
+  ];
+  assertEq(selectNextHost(players, 'missing-host'), 'p2', 'next-host: leaving host not in list → earliest remaining');
+}
+
+{
+  // Disconnected and dead together
+  const players = [
+    { id: 'host1', joinedAt: 1000, alive: true },
+    { id: 'p2', joinedAt: 2000, alive: false },
+    { id: 'p3', joinedAt: 3000, alive: true, disconnectedAt: 100 },
+    { id: 'p4', joinedAt: 4000, alive: true, isStub: true },
+    { id: 'p5', joinedAt: 5000, alive: true },
+  ];
+  assertEq(selectNextHost(players, 'host1'), 'p5', 'next-host: dead + disconnected + stub all skipped');
+}
+
+{
+  // Empty / invalid
+  assertEq(selectNextHost([], 'host1'), null, 'next-host: empty array → null');
+  assertEq(selectNextHost(null, 'host1'), null, 'next-host: null array → null');
+}
+
+// ---------------------------------------------------------------- 7d. chat profanity filter (#50)
+
+section('7d. chat profanity filter (#50)');
+
+{
+  assertEq(filterProfanity(''), '', 'profanity-filter: empty string → empty');
+  assertEq(filterProfanity(null), '', 'profanity-filter: null → empty string');
+  assertEq(
+    filterProfanity('hello there friend'),
+    'hello there friend',
+    'profanity-filter: clean text → unchanged'
+  );
+
+  const bad = PROFANITY_LIST[0];
+  const stars = '*'.repeat(bad.length);
+  assertEq(
+    filterProfanity(`what a ${bad} day`),
+    `what a ${stars} day`,
+    'profanity-filter: single word replaced'
+  );
+
+  // Case-insensitive
+  const badUpper = bad.toUpperCase();
+  assertEq(
+    filterProfanity(`what a ${badUpper} day`),
+    `what a ${stars} day`,
+    'profanity-filter: case-insensitive match'
+  );
+
+  // Word-boundary respected — shouldn't filter substring inside another word.
+  // Use a sentinel word that doesn't collide with other PROFANITY_LIST entries.
+  // Use 'darn' as the test word if it's in the list; otherwise fall back.
+  if (PROFANITY_LIST.includes('darn')) {
+    assertEq(
+      filterProfanity('darnation'),
+      'darnation',
+      'profanity-filter: substring inside a larger word NOT filtered (word boundary)'
+    );
+  }
+
+  // Multiple words
+  if (PROFANITY_LIST.length >= 2) {
+    const w1 = PROFANITY_LIST[0];
+    const w2 = PROFANITY_LIST[1];
+    const s1 = '*'.repeat(w1.length);
+    const s2 = '*'.repeat(w2.length);
+    assertEq(
+      filterProfanity(`${w1} and ${w2}`),
+      `${s1} and ${s2}`,
+      'profanity-filter: multiple profane words replaced'
+    );
+  }
+
+  // Whitespace preserved
+  assertEq(
+    filterProfanity('   hi   '),
+    '   hi   ',
+    'profanity-filter: whitespace preserved'
+  );
+}
+
+// ---------------------------------------------------------------- 7e. game history (#51)
+
+section('7e. game history — buildGameSummary + localStorage round-trip (#51)');
+
+{
+  // In-memory localStorage stub so Node can exercise the history module.
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+    clear: () => store.clear(),
+    key: (i) => Array.from(store.keys())[i] || null,
+    get length() { return store.size; },
+  };
+
+  // Build a summary from a minimal gameState
+  const gameState = {
+    players: [
+      { id: 'p1', name: 'Alex', role: { id: 'mafia', name: 'Mafia' }, alive: false },
+      { id: 'p2', name: 'Blake', role: { id: 'guest', name: 'Guest' }, alive: true },
+      { id: 'p3', name: 'Casey', role: { id: 'host', name: 'Host' }, alive: true, isStub: false },
+    ],
+    nightEliminations: [{ round: 1, targetName: 'Victim1' }],
+    dayEliminations: [{ round: 1, targetName: 'Alex', voteCount: 3 }],
+    roomCode: 'ABCD',
+    startedAt: 1000,
+  };
+
+  const summary = buildGameSummary(gameState, 'guests', 2000);
+  assertEq(summary.roomCode, 'ABCD', 'buildGameSummary: roomCode preserved');
+  assertEq(summary.winner, 'guests', 'buildGameSummary: winner preserved');
+  assertEq(summary.startedAt, 1000, 'buildGameSummary: startedAt preserved');
+  assertEq(summary.endedAt, 2000, 'buildGameSummary: endedAt preserved');
+  assertEq(summary.players.length, 3, 'buildGameSummary: all players included');
+  assertEq(summary.players[0].name, 'Alex', 'buildGameSummary: player name preserved');
+  assertEq(summary.players[0].role, 'mafia', 'buildGameSummary: role id extracted');
+  assertEq(summary.players[0].alive, false, 'buildGameSummary: alive flag preserved');
+  assertEq(summary.nightEliminations.length, 1, 'buildGameSummary: night eliminations copied');
+  assertEq(summary.dayEliminations.length, 1, 'buildGameSummary: day eliminations copied');
+
+  // Round-trip via save/load
+  clearGameHistory();
+  assertEq(loadGameHistory(), [], 'history: empty after clear');
+
+  saveGameSummary(summary);
+  const loaded = loadGameHistory();
+  assertEq(loaded.length, 1, 'history: one entry after save');
+  assertEq(loaded[0].roomCode, 'ABCD', 'history: loaded roomCode matches');
+  assertEq(loaded[0].winner, 'guests', 'history: loaded winner matches');
+
+  // Most-recent-first ordering
+  saveGameSummary({ ...summary, roomCode: 'ZZZZ', endedAt: 3000 });
+  const twoLoaded = loadGameHistory();
+  assertEq(twoLoaded.length, 2, 'history: two entries after second save');
+  assertEq(twoLoaded[0].roomCode, 'ZZZZ', 'history: most recent first');
+  assertEq(twoLoaded[1].roomCode, 'ABCD', 'history: older second');
+
+  // 20-entry LRU cap
+  clearGameHistory();
+  for (let i = 0; i < 25; i++) {
+    saveGameSummary({ ...summary, roomCode: `G${i}`, endedAt: 1000 + i });
+  }
+  const capped = loadGameHistory();
+  assertEq(capped.length, 20, 'history: capped at 20 entries');
+  assertEq(capped[0].roomCode, 'G24', 'history: newest (G24) at front');
+  assertEq(capped[19].roomCode, 'G5', 'history: oldest-kept is G5 (G0-G4 evicted)');
+
+  // clearGameHistory wipes
+  clearGameHistory();
+  assertEq(loadGameHistory(), [], 'history: clear wipes store');
+
+  // Defensive: corrupt JSON → empty array
+  globalThis.localStorage.setItem('hm:history', 'not json');
+  assertEq(loadGameHistory(), [], 'history: corrupt JSON → empty');
+
+  // Cleanup: drop our stub so later sections don't inherit it.
+  delete globalThis.localStorage;
 }
 
 // ---------------------------------------------------------------- composer coverage
