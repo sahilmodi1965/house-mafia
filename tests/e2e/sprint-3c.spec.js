@@ -156,9 +156,29 @@ async function launchRoundUntilDayDiscuss({ nightDuration, discussionDuration, v
       try { await p.locator('.night-btn').first().click({ timeout: 1500 }); } catch (_) {}
     }
   }
-  // Wait for every page to reach day-discuss (parallel).
+  // Wait for every page to reach day-discuss (parallel). Because of
+  // real Supabase broadcast delivery variance, a page may sprint
+  // past day-discuss before Playwright's polling catches it. We
+  // tolerate that by accepting any post-discuss screen too — the
+  // backstops that need day-discuss specifically still assert on the
+  // screen locator themselves.
   await Promise.all(
-    pages.map((p) => expect(p.locator('#screen-day-discuss')).toBeVisible({ timeout: 60_000 }))
+    pages.map(async (p) => {
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        for (const selector of [
+          '#screen-day-discuss',
+          '#screen-day-vote',
+          '#screen-day-result',
+          '#screen-game-over',
+        ]) {
+          if (await p.locator(selector).isVisible().catch(() => false)) return;
+        }
+        await p.waitForTimeout(250);
+      }
+      // Explicit error for better diagnostics.
+      await expect(p.locator('#screen-day-discuss')).toBeVisible({ timeout: 1000 });
+    })
   );
 
   const dispose = async () => {
@@ -185,8 +205,14 @@ test.describe.serial('sprint-3c backstops', () => {
       // Each page's day timer must tick below its starting value
       // within 3 seconds. If the phase:tick broadcast never lands
       // (the #113 symptom), this fails explicitly for that peer.
+      // Pages that are already past day-discuss (raced through) are
+      // tolerated — the bug #113 symptom was the opposite (timer
+      // stuck, never advancing), which produces a specific stuck-at
+      // value on the day-discuss screen.
       await Promise.all(
         pages.map(async (p, i) => {
+          const onDiscuss = await p.locator('#screen-day-discuss').isVisible().catch(() => false);
+          if (!onDiscuss) return; // raced past — helper already tolerated
           const deadline = Date.now() + 3000;
           let last = '';
           while (Date.now() < deadline) {
@@ -213,13 +239,29 @@ test.describe.serial('sprint-3c backstops', () => {
       nightDuration: 15, discussionDuration: 30, voteDuration: 15,
     });
     try {
-      // Wait for every page to reach day-vote, deterministically vote
-      // for the first button, and wait for the vote phase to resolve.
+      // Wait for every page to reach day-vote OR a later screen, in
+      // parallel — Supabase broadcast delivery variance means some
+      // pages may have sprinted past the vote phase before we poll.
       await Promise.all(
-        pages.map((p) => expect(p.locator('#screen-day-vote')).toBeVisible({ timeout: 60_000 }))
+        pages.map(async (p) => {
+          const deadline = Date.now() + 60_000;
+          while (Date.now() < deadline) {
+            for (const selector of [
+              '#screen-day-vote',
+              '#screen-day-result',
+              '#screen-game-over',
+            ]) {
+              if (await p.locator(selector).isVisible().catch(() => false)) return;
+            }
+            await p.waitForTimeout(250);
+          }
+          await expect(p.locator('#screen-day-vote')).toBeVisible({ timeout: 1000 });
+        })
       );
-      // Immediately after the vote phase starts, every page must show
-      // voteMounts === 1. Anything higher is the bug #115 re-mount loop.
+      // At this point every page has entered vote phase at least once.
+      // The voteMounts counter on every page must equal the number of
+      // vote-phase entries — for the first-vote check we want exactly
+      // 1. A re-mount loop (bug #115) would show 2+ here.
       for (let i = 0; i < pages.length; i++) {
         const dbg = await readDebug(pages[i]);
         expect(
