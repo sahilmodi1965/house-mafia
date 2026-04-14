@@ -101,20 +101,27 @@ test('sprint-3a: kick strips ?room= and blocks auto-rejoin (#109)', async () => 
     const searchAfter = await pageB.evaluate(() => window.location.search);
     expect(searchAfter).toBe('');
 
-    // 6. The sessionStorage flag must have been read-and-cleared once
-    //    already — main.js clears it on boot. So it should be null now.
+    // 6. The sessionStorage flag is a defensive guard consumed on the
+    //    NEXT page boot (main.js reads-and-clears it). The kick handler
+    //    navigates in-app without a reload, so the flag should still be
+    //    "1" at this point — it arms the next boot against auto-rejoin.
     const flag = await pageB.evaluate(() => sessionStorage.getItem('hm:just-kicked'));
-    expect(flag).toBeNull();
+    expect(flag).toBe('1');
 
-    // 7. A warn toast explaining why they're back on the title screen.
-    //    The toast text matches /removed/i (both "You were removed from
-    //    the last room" on main.js boot and "You were removed from the
-    //    room" from the kick handler would match, but on the title
-    //    screen only the boot toast should be live).
+    // 7. A warn/error toast explaining why they're back on the title
+    //    screen — the kick handler fires "You were removed from the room".
     const toast = pageB.locator('.toast');
     await expect(toast.first()).toBeVisible({ timeout: 5_000 });
     const toastText = (await toast.first().textContent()) || '';
     expect(toastText).toMatch(/removed/i);
+
+    // 8. Simulate a reload — now main.js should consume the flag and it
+    //    should go back to null, AND the Join screen should NOT auto-open
+    //    because the URL was already stripped in step 5.
+    await pageB.reload({ waitUntil: 'load' });
+    await expect(pageB.locator('#screen-title')).toBeVisible({ timeout: 10_000 });
+    const flagAfterReload = await pageB.evaluate(() => sessionStorage.getItem('hm:just-kicked'));
+    expect(flagAfterReload).toBeNull();
   } finally {
     await ctxA.close().catch(() => {});
     await ctxB.close().catch(() => {});
@@ -133,18 +140,21 @@ test('sprint-3a: kick strips ?room= and blocks auto-rejoin (#109)', async () => 
 test('sprint-3a: Share Room shows success toast on clipboard resolve (#107)', async ({ page }) => {
   test.setTimeout(60_000);
   page.on('console', (m) => { if (m.type() === 'error') console.log('[p0 console error]', m.text()); });
-  await page.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
-  await expect(page.locator('#screen-title')).toBeVisible({ timeout: MAX_BOOT_MS });
 
   // Force clipboard.writeText to resolve deterministically so the test
   // doesn't depend on the headless browser's clipboard permissions
   // (which vary across Playwright versions and platforms).
+  // IMPORTANT: addInitScript must be registered BEFORE page.goto,
+  // it only applies to subsequent navigations.
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: () => Promise.resolve() },
     });
   });
+
+  await page.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
+  await expect(page.locator('#screen-title')).toBeVisible({ timeout: MAX_BOOT_MS });
 
   await page.locator('#btn-create').click();
   await page.locator('#create-name').fill('Sharer');

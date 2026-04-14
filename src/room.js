@@ -519,6 +519,11 @@ async function subscribeToRoom(app, onBack) {
     function attachHandlers() {
       channel
         .on('presence', { event: 'sync' }, () => {
+          // #106: presence:sync can fire after cleanup() nulled `channel`
+          // during teardown (Supabase flushes pending events). Guard so
+          // we never call null.presenceState() — dropping the late event
+          // is safe because the room is already gone.
+          if (!channel) return;
           const state = channel.presenceState();
           if (!isHost && !joinerSettled) {
             // Joiner: presence:sync is the authoritative moment to validate the room.
@@ -632,6 +637,9 @@ async function subscribeToRoom(app, onBack) {
               // Joiner: wait up to 3 s for presence:sync before falling back.
               setTimeout(() => {
                 // If sync already fired and settled, this is a no-op.
+                // #106: guard against channel being nulled by cleanup() in
+                // the intervening 3s (e.g. user navigated away).
+                if (!channel) return;
                 validateJoinerPresence(channel.presenceState());
               }, 3000);
             }
