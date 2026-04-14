@@ -80,7 +80,7 @@ async function openSettingsAndSetMinimumTimers(page) {
   await expect(page.locator('.settings-modal__overlay')).toHaveCount(0);
 }
 
-test('sprint-1: Settings modal opens, adjusts timers to 15/30/15, and closes (#54)', async ({ page }) => {
+test('sprint-1: Settings modal opens, adjusts timers to 15/30/15, and closes (#54 #101)', async ({ page }) => {
   const { consoleErrors } = await bootDevMode(page);
   await createRoom(page, 'SettingsTest');
   await addStubs(page, 3);
@@ -92,9 +92,22 @@ test('sprint-1: Settings modal opens, adjusts timers to 15/30/15, and closes (#5
   await expect(page.locator('input[name="discussionDuration"]')).toHaveCount(3);
   await expect(page.locator('input[name="voteDuration"]')).toHaveCount(3);
 
+  // #101 regression gate — before clicking, the default Night radio
+  // should be 30, NOT 15. This catches a future bug where the initial
+  // render and the post-save round-trip silently agree on the wrong
+  // value.
+  await expect(page.locator('input[name="nightDuration"][value="30"]')).toBeChecked();
+
   await page.locator('input[name="nightDuration"][value="15"]').check();
   await page.locator('input[name="discussionDuration"][value="30"]').check();
   await page.locator('input[name="voteDuration"][value="15"]').check();
+
+  // #101 regression gate — assert the DOM actually reflects the click
+  // before we hit Save. If radioGroup() rendering ever breaks, this
+  // fails loudly instead of the lobby-config string match silently
+  // passing on a coincidental number.
+  await expect(page.locator('input[name="nightDuration"][value="15"]')).toBeChecked();
+  await expect(page.locator('input[name="nightDuration"][value="30"]')).not.toBeChecked();
 
   const roleCheckboxes = page.locator('.settings-modal__role input[type="checkbox"]');
   await expect(roleCheckboxes).toHaveCount(6);
@@ -103,9 +116,27 @@ test('sprint-1: Settings modal opens, adjusts timers to 15/30/15, and closes (#5
   await expect(page.locator('.settings-modal__overlay')).toHaveCount(0);
   await expect(page.locator('#screen-lobby')).toBeVisible();
 
+  // #101 — assert the lobby-config line renders the NEW values in the
+  // specific 'Night 15s · Discuss 30s · Vote 15s' format. The earlier
+  // /15/ + /30/ regex pair passed even when the post-save draft was
+  // stale (Vote defaults include enough digits to accidentally match).
+  // This check is unique to a working radio → draft propagation.
   const configLine = (await page.locator('#lobby-config').textContent()) || '';
-  expect(configLine).toMatch(/15/);
-  expect(configLine).toMatch(/30/);
+  expect(configLine).toContain('Night 15s');
+  expect(configLine).toContain('Discuss 30s');
+  expect(configLine).toContain('Vote 15s');
+
+  // #101 — round-trip check: reopen Settings and the radios we just
+  // saved should now be the checked defaults. If the draft never made
+  // it back into roomConfig, the second-opened modal would re-render
+  // the original 30/40/20 selection and this assertion would fail.
+  await page.locator('#btn-settings').click();
+  await expect(page.locator('.settings-modal__overlay')).toBeVisible();
+  await expect(page.locator('input[name="nightDuration"][value="15"]')).toBeChecked();
+  await expect(page.locator('input[name="discussionDuration"][value="30"]')).toBeChecked();
+  await expect(page.locator('input[name="voteDuration"][value="15"]')).toBeChecked();
+  await page.locator('#settings-cancel').click();
+  await expect(page.locator('.settings-modal__overlay')).toHaveCount(0);
 
   expect(consoleErrors, `console errors during settings flow:\n${consoleErrors.join('\n')}`).toHaveLength(0);
 });
