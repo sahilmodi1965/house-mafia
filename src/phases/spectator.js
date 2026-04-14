@@ -1,3 +1,5 @@
+import { createChatWidget } from '../ui/chat.js';
+
 /**
  * Spectator view — read-only screen.
  *
@@ -214,9 +216,25 @@ export function showEliminatedSpectator({ app, channel, roomCode, currentPlayer,
           <ul class="player-list" id="spectator-eliminated"></ul>
         </div>
       </div>
+      <div id="spectator-chat-slot"></div>
       <p class="spectator-note">Read-only view — waiting for the round to end.</p>
     </div>
   `;
+
+  // #50: mount the chat widget in read-only mode (isAlive=false) so
+  // eliminated players see the live discussion feed but can't type.
+  // This runs for the entire eliminated-spectator lifetime — the
+  // listener is a no-op outside Day-Discussion anyway since no
+  // chat:message frames fire then.
+  const chatSlot = document.getElementById('spectator-chat-slot');
+  if (chatSlot) {
+    const widget = createChatWidget({
+      channel,
+      currentPlayer,
+      isAlive: false,
+    });
+    chatSlot.appendChild(widget.el);
+  }
 
   const phaseEl = document.getElementById('spectator-phase');
   const aliveEl = document.getElementById('spectator-alive');

@@ -75,6 +75,12 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
       discussionEnded = true;
       for (const h of chatterTimers) clearTimeout(h);
       chatterTimers.length = 0;
+      // #50: tear down the chat widget before the screen flips to
+      // voting so its broadcast listener doesn't leak into the next
+      // phase's DOM.
+      try {
+        if (dayHandle && dayHandle.destroyChat) dayHandle.destroyChat();
+      } catch (_) {}
       if (isHost) {
         startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom });
       }
