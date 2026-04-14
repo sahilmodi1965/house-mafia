@@ -713,18 +713,37 @@ function showLobby(app, onBack) {
   const shareBtn = document.getElementById('btn-share-room');
   const sharePanel = document.getElementById('share-panel');
   if (shareBtn && sharePanel) {
-    shareBtn.addEventListener('click', () => {
+    shareBtn.addEventListener('click', async () => {
       const url = buildShareUrl(roomCode);
       renderSharePanel(sharePanel, url);
       sharePanel.hidden = false;
-      // Attempt clipboard copy on click; fall back silently if blocked.
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard
-          .writeText(url)
-          .then(() => {
-            try { showToast('Link copied', { type: 'info', duration: 2000 }); } catch (_) {}
-          })
-          .catch(() => {});
+      // #107: share flow must NEVER be silent. Attempt clipboard copy;
+      // on success show "Link copied", on reject (permissions, insecure
+      // context, Safari quirks, rejected promise) show a fallback toast
+      // AND highlight the URL text so the user can long-press / copy
+      // it manually. Either path fires a toast — the broken case from
+      // live testing (no toast at all) cannot happen anymore.
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) {
+          throw new Error('clipboard unavailable');
+        }
+        await navigator.clipboard.writeText(url);
+        try { showToast('Link copied', { type: 'info', duration: 2000 }); } catch (_) {}
+      } catch (_err) {
+        try { showToast('Link ready — tap to copy', { type: 'warn', duration: 3000 }); } catch (_) {}
+        // Select the URL text so a long-press / Cmd+C lifts it off screen.
+        try {
+          const urlEl = document.getElementById('share-panel-url');
+          if (urlEl && typeof document.createRange === 'function' && window.getSelection) {
+            const range = document.createRange();
+            range.selectNodeContents(urlEl);
+            const sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+          }
+        } catch (_) {}
       }
     });
   }
