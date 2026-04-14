@@ -15,6 +15,7 @@ import {
   checkWinCondition as pureCheckWinCondition,
   shouldDelayEndNight,
 } from './engine/resolve.js';
+import { buildGameSummary, saveGameSummary } from './engine/history.js';
 import { showToast } from './ui/toast.js';
 
 /**
@@ -134,6 +135,20 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
  * @param {Function} opts.onReturnToTitle - Called when the player leaves to title
  */
 function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom }) {
+  // #51: write the finished game to the per-device history store
+  // before the screen flips. Pulls roomCode / startedAt / elimination
+  // tracking off gameState if the host set them (non-host clients
+  // only have the player list + winner — still worth recording).
+  try {
+    const summarySource = gameState && typeof gameState === 'object'
+      ? { ...gameState, players }
+      : { players };
+    const summary = buildGameSummary(summarySource, winner, Date.now());
+    saveGameSummary(summary);
+  } catch (err) {
+    console.error('history: failed to save game summary', err);
+  }
+
   showGameOver(app, {
     winner,
     players,
@@ -205,6 +220,16 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle, 
       if (result.eliminatedPlayer && isHost) {
         const target = gameState.players.find(p => p.id === result.eliminatedPlayer.id);
         if (target) target.alive = false;
+        // #51: record the day elimination for the local history
+        // summary. Uses the same round number the night tick just
+        // incremented on the host.
+        if (gameState && Array.isArray(gameState.dayEliminations)) {
+          gameState.dayEliminations.push({
+            round: gameState.roundNumber || 0,
+            targetName: result.eliminatedPlayer.name,
+            voteCount: typeof result.voteCount === 'number' ? result.voteCount : null,
+          });
+        }
       }
 
       // #49: if the local player died in this vote, route to the
@@ -667,6 +692,25 @@ export function startGame({
             nightProtects,
             players: gameState.players,
           });
+          // #51: record the night elimination for history. Also bump
+          // the round counter so day eliminations below share the
+          // same round index.
+          gameState.roundNumber = (gameState.roundNumber || 0) + 1;
+          if (eliminatedPlayer) {
+            gameState.nightEliminations.push({
+              round: gameState.roundNumber,
+              targetName: eliminatedPlayer.name,
+              savedByDoctor: false,
+            });
+          } else if (killedId) {
+            // The mafia picked a target but it was blocked by a save.
+            const savedPlayer = gameState.players.find((p) => p.id === killedId);
+            gameState.nightEliminations.push({
+              round: gameState.roundNumber,
+              targetName: savedPlayer ? savedPlayer.name : 'unknown',
+              savedByDoctor: true,
+            });
+          }
           gameState.phase = 'night-end';
           channel.send({
             type: 'broadcast',
@@ -1084,6 +1128,9 @@ export function startGame({
     const stubPlayers = DEV_MODE ? players.filter(p => p.isStub) : [];
 
     // Initialize game state on host
+    // #51: seed roomCode/startedAt/elimination arrays for the history
+    // summary written on transitionToGameOver. Host is authoritative
+    // on these; non-host clients use an empty fallback.
     gameState = {
       phase: 'role-reveal',
       players: players.map((p) => ({
@@ -1094,6 +1141,11 @@ export function startGame({
         isStub: !!p.isStub,
       })),
       roles: assignments,
+      roomCode,
+      startedAt: Date.now(),
+      nightEliminations: [],
+      dayEliminations: [],
+      roundNumber: 0,
     };
 
     // Publish each REAL player's role on THAT player's private channel.

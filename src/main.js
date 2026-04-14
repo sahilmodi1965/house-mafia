@@ -3,6 +3,8 @@ import { setSupabase, showCreateScreen, showJoinScreen } from './room.js';
 import { DEV_MODE } from './dev.js';
 import { startPassAndPlay } from './pass-and-play.js';
 import { showToast } from './ui/toast.js';
+import { showHistoryScreen } from './ui/history-screen.js';
+import { loadGameHistory } from './engine/history.js';
 // #53: role-reveal animation tunables. Import via JS so Vite bundles
 // the CSS into docs/assets — no index.html edit needed.
 import './styles/role-reveal-tunables.css';
@@ -30,12 +32,22 @@ if (DEV_MODE) {
 
 // --- Title screen ---
 function showTitle() {
+  // #51: only offer the "Past Games" button if the local history
+  // actually has entries. First-time users don't need empty-state
+  // clutter on the first screen they see.
+  const hasHistory = (() => {
+    try { return loadGameHistory().length > 0; } catch (_) { return false; }
+  })();
+  const historyBtn = hasHistory
+    ? `<button class="btn btn--cyan" id="btn-history">Past Games</button>`
+    : '';
   app.innerHTML = `
     <div id="screen-title" class="screen active">
       <h1>House Mafia</h1>
       <button class="btn btn--pink" id="btn-create">Create Room</button>
       <button class="btn btn--cyan" id="btn-join">Join Room</button>
       <button class="btn btn--yellow" id="btn-pass-play">Pass &amp; Play</button>
+      ${historyBtn}
     </div>
   `;
   document.getElementById('btn-create').addEventListener('click', () => {
@@ -47,6 +59,14 @@ function showTitle() {
   document.getElementById('btn-pass-play').addEventListener('click', () => {
     startPassAndPlay(app, { onLeave: showTitle });
   });
+  if (hasHistory) {
+    const historyBtnEl = document.getElementById('btn-history');
+    if (historyBtnEl) {
+      historyBtnEl.addEventListener('click', () => {
+        showHistoryScreen(app, { onBack: showTitle });
+      });
+    }
+  }
 }
 
 // --- Boot ---
