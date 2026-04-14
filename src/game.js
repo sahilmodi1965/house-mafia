@@ -13,6 +13,7 @@ import {
   checkWinCondition as pureCheckWinCondition,
   shouldDelayEndNight,
 } from './engine/resolve.js';
+import { showToast } from './ui/toast.js';
 
 /**
  * Game loop orchestration.
@@ -124,29 +125,35 @@ function startDayPhase({ channel, currentPlayer, isHost, app, nightEliminatedNam
  * @param {HTMLElement} opts.app
  * @param {Function} opts.onReturnToTitle - Called when the player leaves to title
  */
-function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle }) {
+function transitionToGameOver({ winner, players, channel, currentPlayer, isHost, app, onReturnToTitle, onRestartRoom }) {
   showGameOver(app, {
     winner,
     players,
     isHost,
     onPlayAgain: () => {
-      // Host broadcasts return-to-lobby; resets state locally
-      if (isHost) {
+      // Issue #47: Play Again now restarts the room in place rather
+      // than tearing down the Supabase channel. The host is the only
+      // client that actually broadcasts game:restart — non-host clicks
+      // surface a toast instead (see game-over.js → onPlayAgain wires
+      // host-only on the button; non-host shows "Waiting for host...").
+      if (!isHost) {
+        // Defensive path — game-over.js only renders the button on
+        // hosts, but this keeps the contract explicit.
+        return;
+      }
+      if (channel) {
         channel.send({
           type: 'broadcast',
-          event: 'game:return-lobby',
+          event: 'game:restart',
           payload: {},
         });
       }
-      // Reset game state so a fresh game can start
+      // Reset local state and hand control back to the lobby.
       gameState = null;
-      // Return to lobby by navigating to the title screen.
-      // Players will need to re-create / re-join a room.
-      // Limitation: full lobby reset over Supabase channel is not yet
-      // implemented, so the simplest safe path is returning everyone
-      // to the title screen (which already handles channel teardown via
-      // the Leave flow in room.js).
-      if (onReturnToTitle) onReturnToTitle();
+      try {
+        showToast('New round starting…', { type: 'info', duration: 2000 });
+      } catch (_) {}
+      if (onRestartRoom) onRestartRoom();
     },
     onLeave: () => {
       gameState = null;
@@ -154,8 +161,17 @@ function transitionToGameOver({ winner, players, channel, currentPlayer, isHost,
     },
   });
 
-  // Non-host: also listen for host's Play Again broadcast
+  // Non-host: listen for host's game:restart broadcast and mirror it.
+  // We also keep backward compatibility with game:return-lobby for
+  // clients that may still be on older builds during a rolling deploy.
   if (!isHost) {
+    channel.on('broadcast', { event: 'game:restart' }, () => {
+      gameState = null;
+      try {
+        showToast('New round starting…', { type: 'info', duration: 2000 });
+      } catch (_) {}
+      if (onRestartRoom) onRestartRoom();
+    });
     channel.on('broadcast', { event: 'game:return-lobby' }, () => {
       gameState = null;
       if (onReturnToTitle) onReturnToTitle();
@@ -205,6 +221,7 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
           isHost,
           app,
           onReturnToTitle,
+          onRestartRoom,
         });
       } else {
         // No winner yet — loop back to a fresh Night. The host
@@ -259,6 +276,7 @@ export function startGame({
   isHost,
   app,
   onReturnToTitle,
+  onRestartRoom, // #47: called to re-render the lobby in place after game-over
   roomConfig, // #54: { preset, disabledRoles, ...durations }
 }) {
   const readySet = new Set();
@@ -611,6 +629,7 @@ export function startGame({
               isHost,
               app,
               onReturnToTitle,
+              onRestartRoom,
             });
             return;
           }
@@ -828,6 +847,7 @@ export function startGame({
           app,
           nightEliminatedName: msg.payload.eliminatedName,
           onReturnToTitle,
+          onRestartRoom,
         });
       };
 
@@ -875,6 +895,7 @@ export function startGame({
         isHost,
         app,
         onReturnToTitle,
+        onRestartRoom,
       });
     });
   }

@@ -539,6 +539,7 @@ async function subscribeToRoom(app, onBack) {
               cleanup();
               onBack();
             },
+            onRestartRoom: () => restartRoomInPlace(),
             roomConfig,
           });
         })
@@ -736,6 +737,7 @@ function renderLobby() {
             cleanup();
             if (back) back();
           },
+          onRestartRoom: () => restartRoomInPlace(),
           roomConfig,
         });
       });
@@ -743,6 +745,39 @@ function renderLobby() {
   } else {
     actionsEl.innerHTML = `<p class="waiting-text">Waiting for host to start...</p>`;
   }
+}
+
+/**
+ * Issue #47: Play Again in-place. Resets every player row in the local
+ * roster so the next game starts from clean state, flips the host's
+ * presence phase back to 'lobby' (so new joiners get the lobby screen
+ * instead of spectator), and re-renders the lobby. The Supabase channel
+ * and currentPlayer identity are preserved — this is NOT a teardown.
+ */
+function restartRoomInPlace() {
+  if (!appEl) return;
+  // Strip transient game state from every player. We reset alive/role/
+  // votedFor fields but keep id/name/isHost/isStub intact. Stubs remain
+  // present — the host can remove them via the lobby controls if needed.
+  players = players.map((p) => {
+    const { role, alive, votedFor, ...rest } = p;
+    return rest;
+  });
+
+  if (isHost && currentPlayer) {
+    currentPlayer = { ...currentPlayer, phase: 'lobby' };
+    if (channel && typeof channel.track === 'function') {
+      try {
+        channel.track(currentPlayer);
+      } catch (err) {
+        console.error('restartRoomInPlace: failed to re-track host as lobby', err);
+      }
+    }
+  }
+
+  // showLobby re-renders from scratch and rewires the host Start /
+  // Settings listeners. onBackFn is already cached on the module.
+  showLobby(appEl, onBackFn || (() => {}));
 }
 
 // --- Cleanup ---
