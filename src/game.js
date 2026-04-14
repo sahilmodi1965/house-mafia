@@ -7,6 +7,7 @@ import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction, scheduleStubChatter } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
 import { showGameOver } from './ui/game-over.js';
+import { showEliminatedSpectator } from './phases/spectator.js';
 import {
   resolveMafiaKill as pureResolveMafiaKill,
   resolveNightKill,
@@ -199,6 +200,17 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
         if (target) target.alive = false;
       }
 
+      // #49: if the local player died in this vote, route to the
+      // eliminated-spectator view. On host we use gameState.players;
+      // on non-host we use the players we were handed via the phase
+      // callback, which is the same reference the phase screens use.
+      const livePlayers = isHost && gameState ? gameState.players : players;
+      if (result.eliminatedPlayer && result.eliminatedPlayer.id === currentPlayer.id) {
+        // Flip our own alive flag locally if host hasn't already.
+        const me = livePlayers.find((p) => p.id === currentPlayer.id);
+        if (me) me.alive = false;
+      }
+
       const winner = checkWinCondition();
       if (winner) {
         if (isHost) {
@@ -224,6 +236,9 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
           onRestartRoom,
         });
       } else {
+        // #49: route dead local player to the eliminated spectator
+        // view before advancing phases.
+        if (_eliminatedSpectatorCheck(livePlayers)) return;
         // No winner yet — loop back to a fresh Night. The host
         // re-broadcasts phase:night-start from inside startNightPhase
         // (via the public players list) so joiners re-enter Night too.
@@ -247,6 +262,13 @@ function startVotePhase({ channel, currentPlayer, isHost, app, onReturnToTitle }
  * Set inside startGame() because it closes over channel/currentPlayer/etc.
  */
 let hostStartNextNight = () => {};
+
+// #49: installed by startGame() so module-level phase dispatchers can
+// ask "should this player be in the eliminated-spectator view now?"
+// without plumbing currentRoleData + showEliminatedSpectator through
+// every function signature. Returns true if the spectator view was
+// mounted and the caller should skip its normal phase render.
+let _eliminatedSpectatorCheck = () => false;
 
 /**
  * Start the game. Called when game:start is triggered.
@@ -288,6 +310,48 @@ export function startGame({
   // clients. Joiners first learn the full list from the host's
   // phase:night-start broadcast.
   let nightPlayerList = players;
+
+  // #49: once-per-game latch. Set when we route the local player into
+  // the eliminated-spectator view so subsequent phase broadcasts don't
+  // overwrite it. Cleared implicitly when game-over fires and the
+  // normal game-over screen takes over.
+  let eliminatedSpectatorMounted = false;
+
+  /**
+   * Route the local player to the eliminated spectator view if they
+   * are marked dead in the given player list. Returns true if the
+   * view was mounted (caller should skip the normal phase render).
+   */
+  function maybeRouteToEliminatedSpectator(nextPlayers) {
+    if (eliminatedSpectatorMounted) return true;
+    if (!Array.isArray(nextPlayers)) return false;
+    const me = nextPlayers.find((p) => p && p.id === currentPlayer.id);
+    if (!me || me.alive !== false) return false;
+    const role = currentRoleData && currentRoleData.role;
+    eliminatedSpectatorMounted = true;
+    showEliminatedSpectator({
+      app,
+      channel,
+      roomCode,
+      currentPlayer,
+      role,
+      players: nextPlayers,
+      onGameOver: ({ winner, players: endPlayers }) => {
+        eliminatedSpectatorMounted = false;
+        transitionToGameOver({
+          winner,
+          players: endPlayers,
+          channel,
+          currentPlayer,
+          isHost,
+          app,
+          onReturnToTitle,
+          onRestartRoom,
+        });
+      },
+    });
+    return true;
+  }
 
   // Cache of peer private-channel write handles, keyed by playerId.
   // Populated by the host during role-assign (it already subscribes to
@@ -634,6 +698,9 @@ export function startGame({
             return;
           }
 
+          // #49: host died during night → eliminated spectator view.
+          if (maybeRouteToEliminatedSpectator(gameState.players)) return;
+
           startDayPhase({
             channel,
             currentPlayer,
@@ -710,6 +777,7 @@ export function startGame({
   // There is only one active game session per module, same as
   // gameState, so a single module-level ref is safe.
   hostStartNextNight = () => startNightPhase();
+  _eliminatedSpectatorCheck = (nextPlayers) => maybeRouteToEliminatedSpectator(nextPlayers);
 
   // Handle this player's role assignment. It arrives on their OWN private
   // channel. The shared `channel` never carries role data.
@@ -840,6 +908,9 @@ export function startGame({
       }
 
       const doTransition = () => {
+        // #49: if we died during night, skip the day-discuss view and
+        // route to the eliminated spectator view instead.
+        if (maybeRouteToEliminatedSpectator(msg.payload.players)) return;
         startDayPhase({
           channel,
           currentPlayer,
