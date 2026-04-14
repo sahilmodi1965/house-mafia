@@ -6,6 +6,7 @@ import { showDayDiscussion } from './phases/day.js';
 import { showVoting } from './phases/vote.js';
 import { DEV_MODE, scheduleStubAction, scheduleStubChatter } from './dev.js';
 import { subscribeToPrivate } from './curator.js';
+import { setGameEventHandlers } from './room.js';
 import { showGameOver } from './ui/game-over.js';
 import { showEliminatedSpectator } from './phases/spectator.js';
 import {
@@ -785,6 +786,72 @@ export function startGame({
   hostStartNextNight = () => startNightPhase();
   _eliminatedSpectatorCheck = (nextPlayers) => maybeRouteToEliminatedSpectator(nextPlayers);
 
+  // #33/#34: register presence-event handlers with room.js. The host
+  // re-delivers state on reconnect via the peer's private channel;
+  // any client can be promoted when host migration fires; and if no
+  // successor is viable we tear down the game loop.
+  setGameEventHandlers({
+    onPlayerReconnected: async (player) => {
+      if (!isHost || !player || !player.id || !gameState) return;
+      const roleData = gameState.roles ? gameState.roles[player.id] : null;
+      if (!roleData) return;
+      try {
+        const sendChannel = await subscribeToPrivate(supabase, roomCode, player.id);
+        peerPrivateChannels.set(player.id, sendChannel);
+        await sendChannel.send({
+          type: 'broadcast',
+          event: 'game:state-snapshot',
+          payload: {
+            phase: gameState.phase,
+            players: gameState.players,
+            currentPlayerRole: roleData.role,
+            currentPlayerMafiaPartners: roleData.mafiaPartners || [],
+          },
+        });
+      } catch (err) {
+        console.error('Host: failed to deliver state snapshot on reconnect', err);
+      }
+    },
+    onHostMigration: ({ newHostId, players: migratedPlayers }) => {
+      // Deterministic: every client ran selectNextHost on the same
+      // roster. The elected new host flips its own isHost flag and
+      // takes over the game loop; everyone else just refreshes their
+      // local view. If the new host is THIS client, we re-run the
+      // core host-side setup we can without re-issuing roles.
+      if (Array.isArray(migratedPlayers) && gameState) {
+        gameState.players = migratedPlayers;
+      }
+      if (currentPlayer && currentPlayer.id === newHostId) {
+        isHost = true;
+        // Best-effort re-broadcast of current phase so peers re-sync
+        // their screen even if they dropped a frame during the
+        // migration gap. Uses the public channel (no secrets here).
+        if (gameState && channel) {
+          try {
+            channel.send({
+              type: 'broadcast',
+              event: 'phase:night-start',
+              payload: {
+                players: gameState.players.map((p) => ({
+                  id: p.id,
+                  name: p.name,
+                  alive: p.alive,
+                  isStub: !!p.isStub,
+                })),
+              },
+            });
+          } catch (_) {}
+        }
+      }
+    },
+    onHostGone: () => {
+      // Game is dead. Hand control back to the caller, which will
+      // take the local client back to title.
+      gameState = null;
+      if (onReturnToTitle) onReturnToTitle();
+    },
+  });
+
   // Handle this player's role assignment. It arrives on their OWN private
   // channel. The shared `channel` never carries role data.
   const handleRoleAssign = (payload) => {
@@ -804,6 +871,30 @@ export function startGame({
   };
 
   if (privateChannel) {
+    // #33: state-snapshot re-delivery for reconnecting players. The
+    // host sends one of these on the reconnecter's private channel
+    // when presence:join fires for a previously-disconnected seat.
+    privateChannel.on('broadcast', { event: 'game:state-snapshot' }, (msg) => {
+      const payload = (msg && msg.payload) || {};
+      if (payload.currentPlayerRole) {
+        currentRoleData = {
+          role: payload.currentPlayerRole,
+          mafiaPartners: payload.currentPlayerMafiaPartners || [],
+        };
+      }
+      if (Array.isArray(payload.players)) {
+        nightPlayerList = payload.players;
+        if (gameState) {
+          gameState.players = payload.players;
+        } else {
+          gameState = { phase: payload.phase || 'running', players: payload.players, roles: {} };
+        }
+      }
+      try {
+        showToast('Reconnected — restoring state', { type: 'info', duration: 2500 });
+      } catch (_) {}
+    });
+
     // Drain any role:assign buffered by curator.subscribeToPrivate before
     // this listener was attached (avoids host-sends-before-joiner-listens
     // race).

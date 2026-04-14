@@ -58,6 +58,10 @@ export const GAME = {
   SUBSCRIBE_RETRY_BACKOFF_MS: 500,
   ROOM_GC_CHECK_INTERVAL_MS: 30000,
   ROOM_GC_ABANDON_THRESHOLD_MS: 120000,
+  // #33: grace window before a dropped player is evicted from the roster.
+  RECONNECT_GRACE_MS: 30000,
+  // #34: grace window before a dropped host triggers migration.
+  HOST_MIGRATION_GRACE_MS: 30000,
   MAX_SPECTATORS: 25,
   ROLE_PRESETS: {
     classic: CLASSIC_DISTRIBUTION,
