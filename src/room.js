@@ -730,6 +730,16 @@ async function subscribeToRoom(app, onBack) {
           // window. If they come back via the 'join' handler above,
           // the timer is cleared and the seat is restored.
           if (!key) return;
+          // Ignore leave events for our OWN presence key. Supabase
+          // fires a leave any time a client re-calls channel.track()
+          // (which we do on game start, settings save, and host
+          // promotion). Our own client never "leaves" from its own
+          // perspective — any leave for our id is a retrack artifact
+          // and must not trigger the disconnect grace window (that
+          // would otherwise evict ourselves 30s later and, if we are
+          // the host, run selectNextHost → null → onHostGone →
+          // return-to-title mid-game).
+          if (currentPlayer && key === currentPlayer.id) return;
           const leaving = players.find((p) => p.id === key);
           if (!leaving) return;
           if (leaving.isSpectator) return; // spectators just evaporate
