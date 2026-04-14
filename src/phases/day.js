@@ -110,7 +110,7 @@ export function showDayDiscussion({ app, channel, players, currentPlayer, isHost
         payload: {},
       });
       if (onDiscussionEnd) onDiscussionEnd();
-    });
+    }, { fireWarnings: false });
     hostTimer.start();
   } else {
     // Non-host: listen for ticks

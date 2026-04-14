@@ -148,7 +148,7 @@ export function showVoting({ app, channel, players, currentPlayer, isHost, onVot
       setTimeout(() => {
         if (onVoteResult) onVoteResult(result);
       }, 3000);
-    });
+    }, { fireWarnings: false });
     hostTimer.start();
 
     // In dev mode, auto-cast votes for stub players
