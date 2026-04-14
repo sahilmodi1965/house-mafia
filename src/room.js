@@ -8,6 +8,7 @@ import {
   defaultRoomConfig,
   applyRoomConfig,
 } from './ui/settings-modal.js';
+import { showToast } from './ui/toast.js';
 
 /**
  * Room module — create room, join room, lobby with Supabase Realtime presence.
@@ -607,6 +608,8 @@ function showLobby(app, onBack) {
       <p class="player-count" id="lobby-count">${players.length}/${GAME.MAX_PLAYERS}</p>
       <ul class="player-list" id="lobby-players"></ul>
       <p class="lobby-config" id="lobby-config"></p>
+      <button class="btn btn--yellow" id="btn-share-room">Share Room</button>
+      <div id="share-panel" class="share-panel" hidden></div>
       <div id="lobby-actions"></div>
       ${settingsBtn}
       ${devStubRow}
@@ -618,6 +621,28 @@ function showLobby(app, onBack) {
     cleanup();
     onBack();
   });
+
+  // #48: Share Room — expose a join URL + QR code inline. Pure UI;
+  // no Supabase writes, no new dependency. QR is rendered via the
+  // free Google Charts URL so we don't ship a QR encoder.
+  const shareBtn = document.getElementById('btn-share-room');
+  const sharePanel = document.getElementById('share-panel');
+  if (shareBtn && sharePanel) {
+    shareBtn.addEventListener('click', () => {
+      const url = buildShareUrl(roomCode);
+      renderSharePanel(sharePanel, url);
+      sharePanel.hidden = false;
+      // Attempt clipboard copy on click; fall back silently if blocked.
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard
+          .writeText(url)
+          .then(() => {
+            try { showToast('Link copied', { type: 'info', duration: 2000 }); } catch (_) {}
+          })
+          .catch(() => {});
+      }
+    });
+  }
 
   if (isHost) {
     const settingsEl = document.getElementById('btn-settings');
@@ -745,6 +770,57 @@ function renderLobby() {
   } else {
     actionsEl.innerHTML = `<p class="waiting-text">Waiting for host to start...</p>`;
   }
+}
+
+/**
+ * Issue #48: build a shareable join URL for the given room code.
+ * Re-uses the current origin + pathname so gh-pages preview URLs
+ * and the live build both stay in sync. The `?room=` param is
+ * consumed at boot in main.js.
+ */
+function buildShareUrl(code) {
+  try {
+    const base = `${window.location.origin}${window.location.pathname}`;
+    return `${base}?room=${encodeURIComponent(code || '')}`;
+  } catch (_) {
+    return `?room=${code || ''}`;
+  }
+}
+
+/**
+ * Issue #48: render the share panel (link text + lazy QR image).
+ * Uses the Google Charts QR endpoint — zero dependency, stable URL.
+ */
+function renderSharePanel(panelEl, url) {
+  const qrSrc = `https://chart.googleapis.com/chart?cht=qr&chs=180x180&chl=${encodeURIComponent(url)}`;
+  panelEl.innerHTML = `
+    <style>
+      .share-panel {
+        margin: 0.75rem auto;
+        padding: 0.75rem;
+        border: 1px solid var(--neon-cyan, #00f0ff);
+        border-radius: 6px;
+        max-width: 18rem;
+        text-align: center;
+      }
+      .share-panel__url {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.8rem;
+        word-break: break-all;
+        color: var(--neon-cyan, #00f0ff);
+        margin-bottom: 0.5rem;
+      }
+      .share-panel__qr {
+        width: 180px;
+        height: 180px;
+        background: #fff;
+        padding: 4px;
+        border-radius: 4px;
+      }
+    </style>
+    <div class="share-panel__url" id="share-panel-url">${url}</div>
+    <img class="share-panel__qr" loading="lazy" alt="Room QR code" src="${qrSrc}" />
+  `;
 }
 
 /**
