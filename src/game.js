@@ -1050,6 +1050,22 @@ export function startGame({
         nightPlayerList = payload.players;
       }
       nightHandle = null;
+      // #116: if this peer just died during Night, route to the
+      // eliminated-spectator view immediately on night-end rather than
+      // waiting for phase:day-discuss. The previous flow only routed
+      // on day-discuss, which races with the #95 investigate grace
+      // window setTimeout on Host-role clients — if the grace delay
+      // fires after phase:day-discuss arrives, the transition is held
+      // open and the dead investigator stays stuck on the Night screen
+      // forever because the day-discuss listener short-circuits on
+      // `eliminatedSpectatorMounted` never having flipped. Routing on
+      // night-end is strictly earlier than any day-discuss path and
+      // is idempotent (maybeRouteToEliminatedSpectator returns true
+      // without re-mounting if already mounted), so the day-discuss
+      // listener still no-ops cleanly afterward.
+      if (Array.isArray(payload.players)) {
+        maybeRouteToEliminatedSpectator(payload.players);
+      }
     });
   }
 
