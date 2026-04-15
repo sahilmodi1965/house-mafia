@@ -465,9 +465,15 @@ export function showCreateScreen(app, onBack) {
       await subscribeToRoom(app, onBack);
       localStorage.setItem('lastRoomCreatedAt', Date.now().toString());
     } catch (err) {
-      errorEl.textContent = err && err.message === 'Connection failed — check your internet'
-        ? err.message
-        : 'Failed to create room. Try again.';
+      // #42: surface the realtime subscribe-timeout verbatim so the user
+      // (and CI helpers) see a real cause instead of a generic failure.
+      if (err && err.message === 'Connection failed — check your internet') {
+        errorEl.textContent = err.message;
+      } else if (err && err.message === 'Realtime connection timed out after 5s') {
+        errorEl.textContent = err.message;
+      } else {
+        errorEl.textContent = 'Failed to create room. Try again.';
+      }
     }
   });
 }
@@ -531,6 +537,9 @@ export function showJoinScreen(app, onBack) {
     } catch (err) {
       if (err && err.message === 'Connection failed — check your internet') {
         errorEl.textContent = err.message;
+      } else if (err && err.message === 'Realtime connection timed out after 5s') {
+        // #42: surface the realtime subscribe-timeout verbatim.
+        errorEl.textContent = err.message;
       } else if (!errorEl.textContent) {
         errorEl.textContent = 'Failed to join room. Try again.';
       }
@@ -567,6 +576,40 @@ async function subscribeToRoom(app, onBack) {
     // connection after page load (cold-start) before the websocket is warm. Retry
     // transparently before surfacing the error to the user.
     let subscribeRetries = 0;
+    // #42: hard ceiling on a single channel.subscribe() attempt. If neither
+    // SUBSCRIBED nor CHANNEL_ERROR fires within this window, the websocket
+    // is silently hung (CI runners occasionally fail to reach Supabase edge)
+    // and the promise would otherwise never settle. Fire a synthetic error
+    // so the create-room UI can surface a real message instead of freezing.
+    // 5s is comfortably above a warm Supabase subscribe (< 1s) and a cold
+    // subscribe (< 3s), so legitimate slow connections are unaffected.
+    const SUBSCRIBE_STATUS_TIMEOUT_MS = 5000;
+    let subscribeStatusTimer = null;
+    // Latched once SUBSCRIBED is observed. Prevents a late retry or stray
+    // re-arm from blowing away an already-established channel.
+    let subscribeSucceeded = false;
+    function clearSubscribeStatusTimer() {
+      if (subscribeStatusTimer) {
+        clearTimeout(subscribeStatusTimer);
+        subscribeStatusTimer = null;
+      }
+    }
+    function armSubscribeStatusTimer() {
+      if (subscribeSucceeded) return;
+      clearSubscribeStatusTimer();
+      subscribeStatusTimer = setTimeout(() => {
+        subscribeStatusTimer = null;
+        if (subscribeSucceeded) return;
+        // Tear down the hung channel so we don't leak a websocket.
+        try {
+          if (channel) channel.unsubscribe();
+        } catch (_) {
+          // ignore — channel may already be in a bad state
+        }
+        channel = null;
+        reject(new Error('Realtime connection timed out after 5s'));
+      }, SUBSCRIBE_STATUS_TIMEOUT_MS);
+    }
 
     async function validateJoinerPresence(state) {
       if (joinerSettled) return;
@@ -848,6 +891,10 @@ async function subscribeToRoom(app, onBack) {
         })
         .subscribe(async (status) => {
           if (status === 'SUBSCRIBED') {
+            // #42: we reached a terminal status — latch + cancel the
+            // hang-timeout so no retry can re-arm it after we succeed.
+            subscribeSucceeded = true;
+            clearSubscribeStatusTimer();
             if (isHost) {
               // Creator: track immediately; no presence validation needed.
               await channel.track(currentPlayer);
@@ -870,6 +917,9 @@ async function subscribeToRoom(app, onBack) {
               }, 3000);
             }
           } else if (status === 'CHANNEL_ERROR') {
+            // #42: we reached a terminal status — cancel the hang-timeout.
+            // The retry path will re-arm it after attachHandlers() runs.
+            clearSubscribeStatusTimer();
             if (subscribeRetries < GAME.MAX_SUBSCRIBE_RETRIES) {
               // Supabase Realtime cold-start: tear down and re-subscribe on a
               // fresh channel after a short backoff.
@@ -889,6 +939,9 @@ async function subscribeToRoom(app, onBack) {
             }
           }
         });
+      // #42: arm the hard timeout immediately after calling .subscribe().
+      // Any terminal status clears it; any retry re-arms it.
+      armSubscribeStatusTimer();
     }
 
     attachHandlers();
