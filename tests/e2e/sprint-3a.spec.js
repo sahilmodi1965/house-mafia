@@ -33,6 +33,42 @@ function hasSupabaseCreds() {
   }
 }
 
+/**
+ * #42: create a room with diagnostic telemetry. Distinguishes between
+ * env-missing, subscribe-timeout (new 5s hard cap in src/room.js) and
+ * a silent WebSocket hang so CI failures report the real cause.
+ */
+async function createRoomWithDiag(page, name) {
+  await page.locator('#btn-create').click();
+  await page.locator('#create-name').fill(name);
+  await page.locator('#btn-do-create').click();
+  const createErr = page.locator('#create-error');
+  const lobby = page.locator('#screen-lobby');
+  const outcome = await Promise.race([
+    lobby.waitFor({ state: 'visible', timeout: 20_000 }).then(() => 'lobby'),
+    createErr
+      .filter({ hasText: /Supabase not configured|Failed to create/ })
+      .waitFor({ timeout: 20_000 })
+      .then(() => 'env-missing'),
+    createErr
+      .filter({ hasText: /Realtime connection timed out/ })
+      .waitFor({ timeout: 20_000 })
+      .then(() => 'subscribe-timeout'),
+  ]).catch(() => 'timeout');
+  if (outcome === 'lobby') return;
+  const errText = (await createErr.textContent().catch(() => '')) || '';
+  if (outcome === 'env-missing') {
+    throw new Error(`Lobby did not appear — env missing. "${errText.trim()}"`);
+  }
+  if (outcome === 'subscribe-timeout') {
+    throw new Error(`Supabase Realtime subscribe-timeout — see factory#42. "${errText.trim()}"`);
+  }
+  throw new Error(
+    'Realtime connection hung — WebSocket never reached SUBSCRIBED ' +
+      '(check runner network egress to Supabase)'
+  );
+}
+
 // ------------------------------------------------------------------ 1
 // #109 — kick flow strips URL and prevents rejoin.
 //
@@ -61,10 +97,7 @@ test('sprint-3a: kick strips ?room= and blocks auto-rejoin (#109)', async () => 
     // 1. pageA creates a room (no ?room=, host path).
     await pageA.goto('/', { waitUntil: 'load', timeout: MAX_BOOT_MS });
     await expect(pageA.locator('#screen-title')).toBeVisible();
-    await pageA.locator('#btn-create').click();
-    await pageA.locator('#create-name').fill('HostA');
-    await pageA.locator('#btn-do-create').click();
-    await expect(pageA.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+    await createRoomWithDiag(pageA, 'HostA');
     await expect(pageA.locator('#lobby-count')).toHaveText(/^1\//, { timeout: 20_000 });
 
     const code = ((await pageA.locator('#lobby-code').textContent()) || '').trim();
@@ -156,10 +189,7 @@ test('sprint-3a: Share Room shows success toast on clipboard resolve (#107)', as
   await page.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
   await expect(page.locator('#screen-title')).toBeVisible({ timeout: MAX_BOOT_MS });
 
-  await page.locator('#btn-create').click();
-  await page.locator('#create-name').fill('Sharer');
-  await page.locator('#btn-do-create').click();
-  await expect(page.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+  await createRoomWithDiag(page, 'Sharer');
 
   await page.locator('#btn-share-room').click();
   // A toast MUST appear within 3s — success path shows "Link copied".
@@ -182,10 +212,7 @@ test('sprint-3a: Share Room shows fallback toast when clipboard rejects (#107)',
   await page.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
   await expect(page.locator('#screen-title')).toBeVisible({ timeout: MAX_BOOT_MS });
 
-  await page.locator('#btn-create').click();
-  await page.locator('#create-name').fill('Sharer');
-  await page.locator('#btn-do-create').click();
-  await expect(page.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+  await createRoomWithDiag(page, 'Sharer');
 
   await page.locator('#btn-share-room').click();
   // A toast MUST still appear — fallback path shows "tap to copy".
@@ -211,10 +238,7 @@ test('sprint-3a: QR image loads or hides gracefully (#108)', async ({ page }) =>
   test.setTimeout(30_000);
   await page.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
   await expect(page.locator('#screen-title')).toBeVisible({ timeout: MAX_BOOT_MS });
-  await page.locator('#btn-create').click();
-  await page.locator('#create-name').fill('QRTester');
-  await page.locator('#btn-do-create').click();
-  await expect(page.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+  await createRoomWithDiag(page, 'QRTester');
 
   await page.locator('#btn-share-room').click();
   await expect(page.locator('#share-panel')).toBeVisible({ timeout: 5_000 });

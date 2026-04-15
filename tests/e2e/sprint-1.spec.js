@@ -37,7 +37,10 @@ async function createRoom(page, name = 'TestHost') {
 
   // Wait for the lobby screen — this implies the Supabase channel
   // subscription landed and presence is tracking. If env creds are
-  // missing, an error text appears in #create-error instead.
+  // missing, an error text appears in #create-error instead. If the
+  // realtime socket hangs silently (#42), the 5s subscribe-timeout
+  // in src/room.js writes "Realtime connection timed out" to
+  // #create-error — we surface that as a distinct diagnostic.
   const createErr = page.locator('#create-error');
   const lobby = page.locator('#screen-lobby');
 
@@ -46,16 +49,35 @@ async function createRoom(page, name = 'TestHost') {
     createErr
       .filter({ hasText: /Supabase not configured|Failed to create/ })
       .waitFor({ timeout: 15_000 })
-      .then(() => 'error'),
+      .then(() => 'env-missing'),
+    createErr
+      .filter({ hasText: /Realtime connection timed out/ })
+      .waitFor({ timeout: 15_000 })
+      .then(() => 'subscribe-timeout'),
   ]).catch(() => 'timeout');
 
-  if (outcome !== 'lobby') {
-    const errText = (await createErr.textContent().catch(() => '')) || '';
+  if (outcome === 'lobby') return;
+
+  const errText = (await createErr.textContent().catch(() => '')) || '';
+  if (outcome === 'env-missing') {
     throw new Error(
-      `Lobby did not appear (outcome=${outcome}). Create error: "${errText.trim()}". ` +
+      `Lobby did not appear — env missing. Create error: "${errText.trim()}". ` +
         `Check that .env has VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY set.`
     );
   }
+  if (outcome === 'subscribe-timeout') {
+    throw new Error(
+      `Supabase Realtime subscribe-timeout — see factory#42. Create error: "${errText.trim()}".`
+    );
+  }
+  // Pure hang — no error text, no lobby. The button is still enabled and
+  // the WebSocket never reached SUBSCRIBED. This is the CI runner hang
+  // documented in factory#42 that the subscribe-timeout fix now catches
+  // locally; if it still fires the timeout plumbing itself regressed.
+  throw new Error(
+    'Realtime connection hung — WebSocket never reached SUBSCRIBED ' +
+      '(check runner network egress to Supabase)'
+  );
 }
 
 async function addStubs(page, count) {

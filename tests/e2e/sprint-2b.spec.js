@@ -47,7 +47,38 @@ async function createDevRoom(page, name = 'HostA') {
   await page.locator('#btn-create').click();
   await page.locator('#create-name').fill(name);
   await page.locator('#btn-do-create').click();
-  await expect(page.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+
+  // #42: distinguish between silent realtime hangs and genuine lobby
+  // arrival so CI failures report the real cause. The three shapes:
+  //   lobby          → SUBSCRIBED fired, presence tracked. Success.
+  //   env-missing    → #create-error matches /Supabase not configured/.
+  //   subscribe-tmo  → #create-error matches /Realtime connection .../.
+  //   hang           → nothing ever happens → throw a diagnostic.
+  const createErr = page.locator('#create-error');
+  const lobby = page.locator('#screen-lobby');
+  const outcome = await Promise.race([
+    lobby.waitFor({ state: 'visible', timeout: 20_000 }).then(() => 'lobby'),
+    createErr
+      .filter({ hasText: /Supabase not configured|Failed to create/ })
+      .waitFor({ timeout: 20_000 })
+      .then(() => 'env-missing'),
+    createErr
+      .filter({ hasText: /Realtime connection timed out/ })
+      .waitFor({ timeout: 20_000 })
+      .then(() => 'subscribe-timeout'),
+  ]).catch(() => 'timeout');
+  if (outcome === 'lobby') return;
+  const errText = (await createErr.textContent().catch(() => '')) || '';
+  if (outcome === 'env-missing') {
+    throw new Error(`Lobby did not appear — env missing. "${errText.trim()}"`);
+  }
+  if (outcome === 'subscribe-timeout') {
+    throw new Error(`Supabase Realtime subscribe-timeout — see factory#42. "${errText.trim()}"`);
+  }
+  throw new Error(
+    'Realtime connection hung — WebSocket never reached SUBSCRIBED ' +
+      '(check runner network egress to Supabase)'
+  );
 }
 
 async function addStubs(page, count) {
@@ -178,10 +209,7 @@ test('sprint-2b: name collision rejection (#52)', async () => {
   try {
     await pageA.goto('/', { waitUntil: 'load', timeout: MAX_BOOT_MS });
     await expect(pageA.locator('#screen-title')).toBeVisible();
-    await pageA.locator('#btn-create').click();
-    await pageA.locator('#create-name').fill('Twin');
-    await pageA.locator('#btn-do-create').click();
-    await expect(pageA.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+    await createDevRoom(pageA, 'Twin');
     // Wait for the host's presence to propagate to the channel before
     // the second page subscribes — otherwise pageB may see an empty
     // presence state and reject as "Room not found".
