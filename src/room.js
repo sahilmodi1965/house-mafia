@@ -102,7 +102,7 @@ async function isRoomCodeAvailable(client, code) {
         // Timed out waiting for sync — treat as available (no one responded)
         resolve(true);
       }
-    }, 1000);
+    }, GAME.ROOM_CODE_PROBE_TIMEOUT_MS);
 
     probe
       .on('presence', { event: 'sync' }, () => {
