@@ -87,21 +87,44 @@ function generateRoomCode(length = GAME.ROOM_CODE_LENGTH) {
  * Probe a candidate room code by subscribing without tracking presence.
  * Returns true if the channel appears empty (code is available), false if taken.
  * The probe never calls channel.track(), so it leaves no presence state behind.
+ *
+ * #120: the probe MUST fully remove its channel from the Supabase client
+ * registry before returning — not just `.unsubscribe()`. The Supabase
+ * Realtime client caches channels by topic (`this.channels.find(c =>
+ * c.topic === topic)`), and `.unsubscribe()` does not eagerly evict the
+ * entry. If the winning candidate code's probe channel is still cached
+ * when `subscribeToRoom` calls `supabase.channel('room:${code}', ...)`,
+ * the client returns the probe channel (already joined), which then
+ * throws `cannot add 'presence' callbacks ... after 'subscribe()'` on
+ * the first `.on(...)` call of `attachHandlers()`. `removeChannel()`
+ * awaits the unsubscribe AND calls `teardown()` which evicts the topic.
  */
 async function isRoomCodeAvailable(client, code) {
-  return new Promise((resolve) => {
-    const probe = client.channel(`room:${code}`, {
-      config: { presence: { key: '__probe__' } },
-    });
+  const probe = client.channel(`room:${code}`, {
+    config: { presence: { key: '__probe__' } },
+  });
 
+  // Fully remove the probe channel from the client registry so the
+  // topic slot is free for the real subscription that follows. Await
+  // the removal so callers can't race the Supabase topic cache.
+  const teardown = async () => {
+    try {
+      await client.removeChannel(probe);
+    } catch (_) {
+      // Best-effort fallback: if removeChannel throws, try a plain
+      // unsubscribe so we don't leak the probe in the registry.
+      try { probe.unsubscribe(); } catch (_e) {}
+    }
+  };
+
+  const result = await new Promise((resolve) => {
     let settled = false;
     const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        probe.unsubscribe();
-        // Timed out waiting for sync — treat as available (no one responded)
-        resolve(true);
-      }
+      if (settled) return;
+      settled = true;
+      // Timed out waiting for sync — treat as available (no one responded).
+      // teardown() after the Promise handles channel cleanup via removeChannel.
+      resolve(true);
     }, GAME.ROOM_CODE_PROBE_TIMEOUT_MS);
 
     probe
@@ -110,11 +133,13 @@ async function isRoomCodeAvailable(client, code) {
         settled = true;
         clearTimeout(timeout);
         const count = Object.keys(probe.presenceState()).length;
-        probe.unsubscribe();
         resolve(count === 0);
       })
       .subscribe();
   });
+
+  await teardown();
+  return result;
 }
 
 /**
@@ -432,6 +457,7 @@ export function showCreateScreen(app, onBack) {
     const nameInput = document.getElementById('create-name');
     const name = nameInput.value.trim();
     const errorEl = document.getElementById('create-error');
+    const createBtn = document.getElementById('btn-do-create');
 
     if (!name) {
       errorEl.textContent = 'Please enter a display name.';
@@ -460,12 +486,32 @@ export function showCreateScreen(app, onBack) {
       phase: 'lobby',
     };
 
+    // #120: wayfinding stub. Create Room involves 1–3 s of room-code
+    // probing + Supabase channel subscribe before the lobby paints. A
+    // silent "Create" button left the user unsure whether the click
+    // registered — which is exactly the bug report (button "does
+    // nothing"). Show a plain DOM status line immediately so the UI
+    // confirms the transition started, even if the subscribe later
+    // errors. Cleared on error; replaced by the lobby on success.
+    errorEl.textContent = '';
+    if (createBtn) createBtn.disabled = true;
+    const statusEl = document.createElement('p');
+    statusEl.className = 'wayfinding-banner';
+    statusEl.id = 'create-status';
+    statusEl.setAttribute('data-wayfinding', '1');
+    statusEl.textContent = 'Creating room…';
+    errorEl.parentNode.insertBefore(statusEl, errorEl);
+
     try {
       roomCode = await findAvailableRoomCode(supabase);
       await subscribeToRoom(app, onBack);
       localStorage.setItem('lastRoomCreatedAt', Date.now().toString());
     } catch (err) {
-      // #42: surface the realtime subscribe-timeout verbatim so the user
+      // #121: remove the wayfinding stub and re-enable the button on failure.
+      try { statusEl.remove(); } catch (_) {}
+      if (createBtn) createBtn.disabled = false;
+
+      // #42 / #117: surface the realtime subscribe-timeout verbatim so the user
       // (and CI helpers) see a real cause instead of a generic failure.
       if (err && err.message === 'Connection failed — check your internet') {
         errorEl.textContent = err.message;
@@ -553,7 +599,21 @@ async function subscribeToRoom(app, onBack) {
   appEl = app;
   onBackFn = onBack;
 
+  // #120: guard every channel build against a null currentPlayer /
+  // roomCode. Create Room populates currentPlayer synchronously before
+  // calling subscribeToRoom, but the CHANNEL_ERROR retry path fires
+  // from inside a setTimeout — and cleanup() (user hit Back, navigated
+  // away, kick flow) may have nulled both between schedule and fire.
+  // Reading currentPlayer.id on a null player throws a TypeError that
+  // bubbles out of the subscribe callback and silently kills the Create
+  // Room flow with no UI feedback.
   function buildChannel() {
+    if (!currentPlayer || !currentPlayer.id) {
+      throw new Error('buildChannel: currentPlayer is not initialized');
+    }
+    if (!roomCode) {
+      throw new Error('buildChannel: roomCode is not set');
+    }
     return supabase.channel(`room:${roomCode}`, {
       config: {
         presence: { key: currentPlayer.id },
@@ -923,15 +983,49 @@ async function subscribeToRoom(app, onBack) {
             if (subscribeRetries < GAME.MAX_SUBSCRIBE_RETRIES) {
               // Supabase Realtime cold-start: tear down and re-subscribe on a
               // fresh channel after a short backoff.
+              //
+              // #120: presence-callback race fix. The Supabase Realtime
+              // client caches channels by topic — `supabase.channel(topic,
+              // ...)` returns the cached instance if one exists. A plain
+              // `channel.unsubscribe()` does NOT evict the topic from the
+              // cache eagerly. So `buildChannel()` on the retry would
+              // return the OLD (joined / joining) channel, and the very
+              // first `.on('presence', ...)` call inside attachHandlers()
+              // would throw `cannot add 'presence' callbacks after
+              // 'subscribe()'`. `removeChannel()` unsubscribes AND tears
+              // down, which drops the topic from the client registry.
               subscribeRetries += 1;
+              const oldChannel = channel;
+              // Null the module-scoped `channel` so any late presence/
+              // broadcast events from the old channel that fire between
+              // here and the retry's buildChannel() bail early (see the
+              // existing `if (!channel) return;` guards in the sync
+              // handler and the 3s joiner fallback).
+              channel = null;
               try {
-                channel.unsubscribe();
+                // removeChannel is async; we intentionally don't block
+                // the subscribe callback on it — the setTimeout below
+                // waits long enough (SUBSCRIBE_RETRY_BACKOFF_MS) for the
+                // unsubscribe + teardown to drain the topic cache.
+                supabase.removeChannel(oldChannel);
               } catch (_) {
-                // ignore — channel may already be in an errored state
+                // Fallback: if removeChannel is unavailable on the client
+                // (older SDK) fall back to plain unsubscribe.
+                try { oldChannel.unsubscribe(); } catch (_e) {}
               }
               setTimeout(() => {
+                // #120: if cleanup() ran while we were waiting (user hit
+                // Back, was kicked, navigated away), currentPlayer is
+                // null. Abort the retry instead of crashing inside
+                // buildChannel() on `currentPlayer.id`.
+                if (!currentPlayer || !roomCode) return;
                 joinerSettled = false;
-                channel = buildChannel();
+                try {
+                  channel = buildChannel();
+                } catch (err) {
+                  reject(err);
+                  return;
+                }
                 attachHandlers();
               }, GAME.SUBSCRIBE_RETRY_BACKOFF_MS);
             } else {
