@@ -552,11 +552,20 @@ export function startGame({
     // (same list, same broadcast already sent) but cheap, and makes
     // re-entry from hostStartNextNight() self-sufficient.
     if (isHost && gameState) {
+      // #114: preserve isHost when projecting gameState → public list.
+      // getGameHostId() reads `isHost` off nightPlayerList to look up the
+      // game host's private channel when a peer (or the local host) needs
+      // to send mafia:pick / host:investigate. Dropping the flag here
+      // made ensureHostPrivateWriteHandle() return null on dev-mode solo
+      // sessions where the ONLY non-stub player was the game host, so
+      // clicks on the Night screen silently dropped and the investigate
+      // result never arrived. See the sprint-1 N=4 full-round test.
       const publicPlayers = gameState.players.map((p) => ({
         id: p.id,
         name: p.name,
         alive: p.alive,
         isStub: !!p.isStub,
+        isHost: !!p.isHost,
       }));
       nightPlayerList = publicPlayers;
       gameState.phase = 'night';
@@ -723,6 +732,7 @@ export function startGame({
                 name: p.name,
                 alive: p.alive,
                 isStub: !!p.isStub,
+                isHost: !!p.isHost,
               })),
             },
           });
@@ -887,6 +897,7 @@ export function startGame({
                   name: p.name,
                   alive: p.alive,
                   isStub: !!p.isStub,
+                  isHost: !!p.isHost,
                 })),
               },
             });
@@ -1039,6 +1050,22 @@ export function startGame({
         nightPlayerList = payload.players;
       }
       nightHandle = null;
+      // #116: if this peer just died during Night, route to the
+      // eliminated-spectator view immediately on night-end rather than
+      // waiting for phase:day-discuss. The previous flow only routed
+      // on day-discuss, which races with the #95 investigate grace
+      // window setTimeout on Host-role clients — if the grace delay
+      // fires after phase:day-discuss arrives, the transition is held
+      // open and the dead investigator stays stuck on the Night screen
+      // forever because the day-discuss listener short-circuits on
+      // `eliminatedSpectatorMounted` never having flipped. Routing on
+      // night-end is strictly earlier than any day-discuss path and
+      // is idempotent (maybeRouteToEliminatedSpectator returns true
+      // without re-mounting if already mounted), so the day-discuss
+      // listener still no-ops cleanly afterward.
+      if (Array.isArray(payload.players)) {
+        maybeRouteToEliminatedSpectator(payload.players);
+      }
     });
   }
 
@@ -1139,6 +1166,10 @@ export function startGame({
         role: assignments[p.id].role,
         alive: true,
         isStub: !!p.isStub,
+        // #114: preserve isHost so getGameHostId() can look up the
+        // game host without consulting the original `players` param
+        // (which isn't in scope from ensureHostPrivateWriteHandle).
+        isHost: !!p.isHost,
       })),
       roles: assignments,
       roomCode,

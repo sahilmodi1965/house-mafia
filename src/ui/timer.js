@@ -41,6 +41,12 @@ export function createTimer(seconds, onTick, onEnd, opts = {}) {
     if (seconds < 15) return; // skip on very short timers
     if (remaining !== warningThreshold) return;
     warningFired = true;
+    // #115: mount-counter debug hook for the hardened multi-client harness.
+    try {
+      if (typeof window !== 'undefined' && window.__hm_debug__) {
+        window.__hm_debug__.warningFires = (window.__hm_debug__.warningFires || 0) + 1;
+      }
+    } catch (_) {}
     try { playSound('timer-warning'); } catch (_) {}
     try { haptic(HAPTIC_WARNING); } catch (_) {}
     try { showToast('10 seconds left', { type: 'warn', duration: 2000 }); } catch (_) {}

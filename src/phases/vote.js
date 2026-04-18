@@ -23,6 +23,13 @@ import { showToast } from '../ui/toast.js';
  * @param {Function} opts.onVoteResult - Called with { eliminatedPlayer: {...}|null, votes: {} }
  */
 export function showVoting({ app, channel, players, currentPlayer, isHost, onVoteResult }) {
+  // #115: mount-counter debug hook for the hardened multi-client harness.
+  // Always safe to no-op outside tests — the counter bag is opt-in.
+  try {
+    if (typeof window !== 'undefined' && window.__hm_debug__) {
+      window.__hm_debug__.voteMounts = (window.__hm_debug__.voteMounts || 0) + 1;
+    }
+  } catch (_) {}
   const isAlive = players.find(p => p.id === currentPlayer.id)?.alive !== false;
   const alivePlayers = players.filter(p => p.alive);
   let hasVoted = false;

@@ -37,6 +37,42 @@ function hasSupabaseCreds() {
   }
 }
 
+/**
+ * #42: create a room with diagnostic telemetry. Distinguishes between
+ * env-missing, subscribe-timeout (new 5s hard cap in src/room.js) and
+ * a silent WebSocket hang so CI failures report the real cause.
+ */
+async function createRoomWithDiag(page, name) {
+  await page.locator('#btn-create').click();
+  await page.locator('#create-name').fill(name);
+  await page.locator('#btn-do-create').click();
+  const createErr = page.locator('#create-error');
+  const lobby = page.locator('#screen-lobby');
+  const outcome = await Promise.race([
+    lobby.waitFor({ state: 'visible', timeout: 20_000 }).then(() => 'lobby'),
+    createErr
+      .filter({ hasText: /Supabase not configured|Failed to create/ })
+      .waitFor({ timeout: 20_000 })
+      .then(() => 'env-missing'),
+    createErr
+      .filter({ hasText: /Realtime connection timed out/ })
+      .waitFor({ timeout: 20_000 })
+      .then(() => 'subscribe-timeout'),
+  ]).catch(() => 'timeout');
+  if (outcome === 'lobby') return;
+  const errText = (await createErr.textContent().catch(() => '')) || '';
+  if (outcome === 'env-missing') {
+    throw new Error(`Lobby did not appear — env missing. "${errText.trim()}"`);
+  }
+  if (outcome === 'subscribe-timeout') {
+    throw new Error(`Supabase Realtime subscribe-timeout — see factory#42. "${errText.trim()}"`);
+  }
+  throw new Error(
+    'Realtime connection hung — WebSocket never reached SUBSCRIBED ' +
+      '(check runner network egress to Supabase)'
+  );
+}
+
 // ------------------------------------------------------------------ 1
 // #33 / #34 — presence grace window + host migration.
 //
@@ -83,10 +119,7 @@ test('sprint-3b: chat message from one player appears on another (#50)', async (
     // Host boots in dev mode so we can shrink timers + add stubs to
     // reach the 4-player minimum with just two real clients.
     await pageA.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
-    await pageA.locator('#btn-create').click();
-    await pageA.locator('#create-name').fill('ChatHost');
-    await pageA.locator('#btn-do-create').click();
-    await expect(pageA.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+    await createRoomWithDiag(pageA, 'ChatHost');
     const code = ((await pageA.locator('#lobby-code').textContent()) || '').trim();
 
     // Shrink timers so the game runs fast.
@@ -168,10 +201,7 @@ test('sprint-3b: chat input disabled state matches isAlive (#50)', async ({ page
   await page.goto('/?dev=1', { waitUntil: 'load', timeout: MAX_BOOT_MS });
   await expect(page.locator('#screen-title')).toBeVisible();
 
-  await page.locator('#btn-create').click();
-  await page.locator('#create-name').fill('SoloHost');
-  await page.locator('#btn-do-create').click();
-  await expect(page.locator('#screen-lobby')).toBeVisible({ timeout: 20_000 });
+  await createRoomWithDiag(page, 'SoloHost');
 
   // Shrink timers.
   await page.locator('#btn-settings').click();
