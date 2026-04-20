@@ -5,11 +5,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const port = Number(process.env.PORT || 4173);
-// Must include Vite's `base` path so the webServer readiness check gets HTTP 200
-// (vite preview only serves content under the configured base, root returns 404).
-// Use `localhost` (not `127.0.0.1`) because Vite may bind to IPv6 `::1`.
-const basePath = process.env.BASE_PATH || '/house-mafia/';
-const baseURL = process.env.BASE_URL || `http://localhost:${port}${basePath}`;
+const baseURL = process.env.BASE_URL || `http://127.0.0.1:${port}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -31,7 +27,7 @@ export default defineConfig({
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
-    command: `npx vite preview --port ${port} --strictPort --host`,
+    command: `npx vite preview --port ${port} --strictPort`,
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 60 * 1000,

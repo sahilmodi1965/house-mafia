@@ -83,11 +83,16 @@ jobs:
           marker='<!-- stratos-qa-result -->'
           existing=$(gh pr view "$PR" --repo "${{ github.repository }}" --json comments --jq "[.comments[] | select(.body | contains(\"$marker\"))] | first | .id // empty")
           body=$(printf '%s\n\n🟢 **QA passed** — smoke test ran cleanly. [Screenshot artifact](%s) (look for `qa-screenshot-pr-%s`).' "$marker" "$artifact_url" "$PR")
+          posted=0
           if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null
-          else
-            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$body"
+            if gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null 2>&1; then
+              posted=1
+            fi
           fi
+          if [ "$posted" -eq 0 ]; then
+            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$body" || true
+          fi
+          exit 0
 
       - name: Comment on PR (failure)
         if: failure()
@@ -102,8 +107,13 @@ jobs:
           marker='<!-- stratos-qa-result -->'
           existing=$(gh pr view "$PR" --repo "${{ github.repository }}" --json comments --jq "[.comments[] | select(.body | contains(\"$marker\"))] | first | .id // empty")
           body=$(printf '%s\n\n🔴 **QA failed** — the Playwright smoke test did not pass. Check the [failing run](%s) for logs and the `qa-report-pr-%s` artifact for the HTML report. This PR is blocked until QA is green.' "$marker" "$artifact_url" "$PR")
+          posted=0
           if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null
-          else
-            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$body"
+            if gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -f body="$body" >/dev/null 2>&1; then
+              posted=1
+            fi
           fi
+          if [ "$posted" -eq 0 ]; then
+            gh pr comment "$PR" --repo "${{ github.repository }}" --body "$body" || true
+          fi
+          exit 0
